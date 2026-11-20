@@ -121,7 +121,6 @@ final class HoldSelectionTests: XCTestCase {
                 XCTAssertEqual(view.selectedApp, 106)
                 XCTAssertEqual(view.highlightedApp, 106)
                 XCTAssertEqual(view.currentWindow?.id, radius > 118 ? "w\(index)" : nil)
-                if radius < 118 { XCTAssertEqual(view.appHighlightPath?.contains(p), true) }
             }
             view.updateHover(at: RingGeometry.point(angle: angle, radius: 2000))
             XCTAssertEqual(activated.count, index)
@@ -138,11 +137,11 @@ final class HoldSelectionTests: XCTestCase {
                 let path = try XCTUnwrap(view.appHighlightPath)
                 for step in 0..<360 {
                     let angle = Double(step) * .pi / 180
-                    for radius in [0.0, 40, 45, 51.9, 52, 117.8, 118, 120] {
+                    for radius in [0.0, 40, 45, 52, 56, 114, 118, 120] {
                         XCTAssertFalse(path.contains(RingGeometry.point(angle: angle, radius: radius)))
                     }
                 }
-                for radius in [53.0, 88, 117] {
+                for radius in [60.0, 85, 110] {
                     XCTAssertTrue(path.contains(RingGeometry.point(angle: view.arcAnchor, radius: radius)))
                 }
                 // The visual inset must not change the established selection threshold.
@@ -253,13 +252,15 @@ final class HoldSelectionTests: XCTestCase {
         XCTAssertFalse(ring.isVisible)
     }
 
-    @MainActor func testExpandedHighlightMatchesSecondaryEdges() async throws {
-        _ = NSApplication.shared
+    @MainActor func testSelectingOuterWindowKeepsHighlightOnParentAppIcon() async throws {
         let view = secondaryView()
+        let appHighlight = try XCTUnwrap(view.appHighlightPath)
         let angle = RingGeometry.arcAngle(index: 0, count: 4, anchor: view.arcAnchor)
         view.updateHover(at: RingGeometry.point(angle: angle, radius: 2000))
         XCTAssertEqual(view.currentWindow?.id, "w0")
-        XCTAssertEqual(view.appHighlightPath?.contains(RingGeometry.point(angle: angle, radius: 88)), true)
+        XCTAssertEqual(view.appHighlightPath, appHighlight)
+        XCTAssertTrue(appHighlight.contains(RingGeometry.appIconCenter(index: 6, count: 8)))
+        XCTAssertFalse(appHighlight.contains(RingGeometry.point(angle: angle, radius: RingGeometry.appRadius)))
     }
 
     @MainActor func testSelectionUsesCurrentPageAndHandlesEmptyLists() async {

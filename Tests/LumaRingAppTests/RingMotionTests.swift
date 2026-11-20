@@ -17,6 +17,36 @@ final class RingMotionTests: XCTestCase {
         XCTAssertNil(layer.animationKeys())
     }
 
+    @MainActor func testAppTileRevealAndHoverScaleAroundTheSameCenter() throws {
+        let tile = RingTile(glass: false)
+        let position = RingGeometry.appIconCenter(index: 1, count: 3)
+        tile.place(in: CGRect(x: position.x - 27, y: position.y - 27, width: 54, height: 54))
+        let layer = try XCTUnwrap(tile.layer)
+        XCTAssertEqual(layer.anchorPoint, CGPoint(x: 0.5, y: 0.5))
+        XCTAssertEqual(layer.position, position)
+
+        tile.reveal(index: 1, count: 3)
+        tile.update(highlighted: true, animated: true)
+        if !RingMotion.reduced {
+            let hover = try XCTUnwrap(layer.animation(forKey: "pose") as? CASpringAnimation)
+            for endpoint in [hover.fromValue, hover.toValue] {
+                let transform = try XCTUnwrap(endpoint as? NSValue).caTransform3DValue
+                XCTAssertTrue(CATransform3DEqualToTransform(transform, CATransform3DMakeScale(transform.m11, transform.m11, 1)))
+            }
+            XCTAssertEqual(layer.transform.m11, 1.12, accuracy: 0.0001)
+            tile.reveal(index: 1, count: 3)
+            let reveal = try XCTUnwrap(layer.animation(forKey: "pose") as? CASpringAnimation)
+            let initial = try XCTUnwrap(reveal.fromValue as? NSValue).caTransform3DValue
+            XCTAssertTrue(CATransform3DEqualToTransform(initial, CATransform3DMakeScale(0.72, 0.72, 1)))
+        } else {
+            XCTAssertTrue(CATransform3DIsIdentity(layer.transform))
+        }
+        XCTAssertEqual(layer.position, position)
+        tile.update(highlighted: false, animated: false)
+        XCTAssertTrue(CATransform3DIsIdentity(layer.transform))
+        XCTAssertEqual(layer.position, position)
+    }
+
     @MainActor func testHoverMovesOnlyPresentationAndKeepsTileCoordinatesStable() async throws {
         let host = NSView(frame: CGRect(x: 0, y: 0, width: 480, height: 480))
         host.wantsLayer = true
@@ -127,6 +157,18 @@ final class RingMotionTests: XCTestCase {
                 try await capture("edge-\(index)-\(appearance.rawValue)")
             }
         }
+        window.appearance = NSAppearance(named: .aqua)
+        view.reset(apps: [], options: Options())
+        view.launcherApps = apps.prefix(3).map { app in
+            LauncherRecord(app: LauncherApp(bundleID: app.bundleID, name: app.name, path: "/unused/\(app.name).app"),
+                icon: app.icon, available: true)
+        }
+        XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
+        try await Task.sleep(nanoseconds: 450_000_000)
+        try await capture("three-favorites")
+        view.updateHover(at: RingGeometry.appIconCenter(index: 1, count: 3))
+        try await Task.sleep(nanoseconds: 450_000_000)
+        try await capture("three-favorites-hover")
     }
 }
 

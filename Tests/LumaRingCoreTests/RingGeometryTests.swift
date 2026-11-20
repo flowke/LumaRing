@@ -3,6 +3,35 @@ import CoreGraphics
 @testable import LumaRingCore
 
 final class RingGeometryTests: XCTestCase {
+    func testAppIconsSitMidwayBetweenTheCenterInsetAndRim() {
+        for count in 1...24 {
+            for index in 0..<count {
+                let position = RingGeometry.appIconCenter(index: index, count: count)
+                let radius = hypot(position.x - RingGeometry.center.x, position.y - RingGeometry.center.y)
+                XCTAssertEqual(radius - RingGeometry.appCenterRadius, RingGeometry.appOuter - radius, accuracy: 0.0001)
+                XCTAssertEqual(RingGeometry.appIndex(at: position, count: count), index)
+            }
+        }
+    }
+
+    func testAppPetalsLeaveSpaceInsideEverySelectableSector() {
+        for count in 1...24 {
+            for index in 0..<count {
+                let path = RingGeometry.appPetalPath(index: index, count: count)
+                let middle = RingGeometry.angle(index: index, count: count)
+                XCTAssertTrue(path.contains(RingGeometry.appIconCenter(index: index, count: count)))
+                for side in [-1.0, 1.0] {
+                    let nearEdge = RingGeometry.point(angle: middle + side * 0.95 * .pi / Double(count), radius: RingGeometry.appRadius)
+                    XCTAssertEqual(RingGeometry.appIndex(at: nearEdge, count: count), index)
+                    XCTAssertFalse(path.contains(nearEdge))
+                }
+            }
+        }
+        let top = RingGeometry.appPetalPath(index: 0, count: 3)
+        let nearCorner = RingGeometry.point(angle: .pi / 2 + 17 * .pi / 180, radius: 111)
+        XCTAssertFalse(top.contains(nearCorner))
+    }
+
     func testSecondaryPetalsStayInsideExistingHitSectorsAcrossWraparound() {
         for count in [2, 4, 8] {
             for anchor in [-Double.pi, -0.7, Double.pi / 2, Double.pi] {
@@ -157,7 +186,7 @@ final class RingGeometryTests: XCTestCase {
                         let angle = RingGeometry.angle(index: i, count: count) + fraction * 2 * .pi / Double(count)
                         let point = RingGeometry.point(angle: angle, radius: radius)
                         XCTAssertEqual(RingGeometry.appIndex(at: point, count: count), i)
-                        XCTAssertTrue(sectors[i].contains(point), "Highlight must cover the hit region")
+                        XCTAssertTrue(sectors[i].contains(point), "The sector must cover the hit region")
                         XCTAssertEqual(sectors.filter { $0.contains(point) }.count, 1, "Exactly one sector owns the point")
                     }
                 }

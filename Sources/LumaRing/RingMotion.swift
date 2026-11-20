@@ -13,10 +13,8 @@ import LumaRingCore
                               view.frame.height / max(1, view.bounds.height), 1)
     }
 
-    static func pose(scale: CGFloat = 1, x: CGFloat = 0, y: CGFloat = 0, rotation: CGFloat = 0) -> CATransform3D {
-        var transform = CATransform3DMakeTranslation(x, y, 0)
-        transform = CATransform3DRotate(transform, rotation, 0, 0, 1)
-        return CATransform3DScale(transform, scale, scale, 1)
+    static func pose(scale: CGFloat, x: CGFloat = 0, y: CGFloat = 0) -> CATransform3D {
+        CATransform3DScale(CATransform3DMakeTranslation(x, y, 0), scale, scale, 1)
     }
 
     static func center(_ view: NSView) {
@@ -126,9 +124,10 @@ import LumaRingCore
     }
 
     func update(highlighted: Bool, animated: Bool) {
+        let enlarges = highlighted && !RingMotion.reduced
         let angle = atan2(frame.midY - RingGeometry.center.y, frame.midX - RingGeometry.center.x)
-        let lift: CGFloat = highlighted && !RingMotion.reduced ? (material == nil ? 3 : 2) : 0
-        let scale: CGFloat = highlighted && !RingMotion.reduced ? (material == nil ? 1.12 : 1.025) : 1
+        let lift: CGFloat = enlarges && material != nil ? 2 : 0
+        let scale: CGFloat = enlarges ? (material == nil ? 1.12 : 1.025) : 1
         let next = RingMotion.pose(scale: scale, x: cos(angle) * lift, y: sin(angle) * lift)
         if !CATransform3DEqualToTransform(target, next), let layer {
             target = next
@@ -138,13 +137,12 @@ import LumaRingCore
         artwork.needsDisplay = true
     }
 
-    func reveal(index: Int, count: Int, secondary: Bool) {
+    func reveal(index: Int, count: Int) {
         guard let layer else { return }
-        let distance: CGFloat = secondary ? 24 : 20
+        let distance: CGFloat = material == nil ? 0 : 24
         let angle = atan2(frame.midY - RingGeometry.center.y, frame.midX - RingGeometry.center.x)
         let delay = RingMotion.reduced ? 0 : Double(index) / Double(max(count - 1, 1)) * 0.045
-        let initial = RingMotion.pose(scale: 0.72, x: -cos(angle) * distance,
-            y: -sin(angle) * distance, rotation: secondary ? 0 : 0.06)
+        let initial = RingMotion.pose(scale: 0.72, x: -cos(angle) * distance, y: -sin(angle) * distance)
         RingMotion.spring(layer, to: target, from: initial, delay: delay)
         RingMotion.fade(layer, from: 0, to: 1, duration: 0.12, delay: delay)
     }

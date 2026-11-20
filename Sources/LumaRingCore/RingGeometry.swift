@@ -6,8 +6,9 @@ public struct RingGeometry {
     public static let canvas: Double = 480
     public static let center = CGPoint(x: 240, y: 240)
     public static let appInner: Double = 40
+    public static let appCenterRadius: Double = 52
     public static let appOuter: Double = 118
-    public static let appRadius: Double = 88
+    public static let appRadius = (appCenterRadius + appOuter) / 2
     public static let windowInner: Double = 118
     public static let windowOuter: Double = 198
     public static let windowRadius: Double = 158
@@ -20,8 +21,21 @@ public struct RingGeometry {
         index(at: point, count: count, inner: appInner, outer: appOuter)
     }
 
+    public static func appIconCenter(index: Int, count: Int) -> CGPoint {
+        point(angle: angle(index: index, count: count), radius: appRadius)
+    }
+
     public static func appSectorPath(index: Int, count: Int) -> CGPath {
         sectorPath(index: index, count: count, inner: appInner, outer: appOuter)
+    }
+
+    public static func appPetalPath(index: Int, count: Int) -> CGPath {
+        guard count > 0, index >= 0, index < count else { return CGMutablePath() }
+        let middle = angle(index: index, count: count)
+        let half = min(18 * .pi / 180, 0.84 * .pi / Double(count))
+        let inner = appCenterRadius + 6, outer = appOuter - 6
+        let corner = min(10, inner * half * 0.65)
+        return roundedSectorPath(start: middle - half, end: middle + half, inner: inner, outer: outer, corner: corner)
     }
 
     public static func sectorPath(index: Int, count: Int, inner: Double, outer: Double) -> CGPath {
@@ -62,12 +76,15 @@ public struct RingGeometry {
 
     /// Visual petals inset slightly from the unchanged secondary hit sectors.
     public static func windowPetalPath(index: Int, count: Int, anchor: Double) -> CGPath {
-        let path = CGMutablePath()
-        guard count > 0, index >= 0, index < count else { return path }
+        guard count > 0, index >= 0, index < count else { return CGMutablePath() }
         let middle = arcAngle(index: index, count: count, anchor: anchor)
         let start = middle - (index == count - 1 ? 0.65 : 0.5) * arcStep + 0.008
         let end = middle + (index == 0 ? 0.65 : 0.5) * arcStep - 0.008
-        let inner = windowInner + 2, outer = windowOuter - 1, corner = 3.0
+        return roundedSectorPath(start: start, end: end, inner: windowInner + 2, outer: windowOuter - 1, corner: 3)
+    }
+
+    private static func roundedSectorPath(start: Double, end: Double, inner: Double, outer: Double, corner: Double) -> CGPath {
+        let path = CGMutablePath()
         path.move(to: point(angle: start, radius: inner + corner))
         path.addLine(to: point(angle: start, radius: outer - corner))
         path.addQuadCurve(to: point(angle: start + corner / outer, radius: outer), control: point(angle: start, radius: outer))

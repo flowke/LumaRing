@@ -26,7 +26,6 @@ enum RingApp {
 }
 
 @MainActor final class RingView: NSView {
-    private static let centerRadius = 52.0
     var apps: [AppRecord] = []
     var additionalFavoriteProcesses: Set<pid_t> = []
     var windows: [WindowRecord] = []
@@ -520,8 +519,8 @@ enum RingApp {
         if let target = closeTarget(at: p) { pressTarget = .close(target) }
         else if let index = windowIndex(at: p) { pressTarget = .window(visibleWindows[index]) }
         else if let app = appTarget(at: p), let index = visibleRingApps.firstIndex(where: { $0.id == app.id }) {
-            let center = RingGeometry.point(angle: RingGeometry.angle(index: index, count: visibleRingApps.count), radius: RingGeometry.appRadius)
-            let hitSize = appIconSize + 12
+            let center = RingGeometry.appIconCenter(index: index, count: visibleRingApps.count)
+            let hitSize = appIconSize + 10
             let icon = CGRect(x: center.x - hitSize / 2, y: center.y - hitSize / 2, width: hitSize, height: hitSize)
             let target = selectedApp == app.running?.pid && windows.count == 1 ? windows[0] : nil
             pressTarget = .app(app, target, draggable: app.running != nil && icon.contains(p))
@@ -811,13 +810,7 @@ enum RingApp {
     var appHighlightPath: CGPath? {
         let apps = visibleRingApps
         guard !isDraggingApp, let tile = highlightedTile, let index = apps.firstIndex(where: { $0.id == tile.id }) else { return nil }
-        let inner = Self.centerRadius + 0.5, outer = RingGeometry.appOuter - 0.75
-        if selectingWithShortcut, showsWindowArc, tile.running?.pid == selectedApp,
-           RingGeometry.arcHalfAngle(count: visibleWindows.count) > .pi / Double(apps.count) {
-            return RingGeometry.arcPath(count: visibleWindows.count, anchor: arcAnchor,
-                inner: inner, outer: outer)
-        }
-        return RingGeometry.sectorPath(index: index, count: apps.count, inner: inner, outer: outer)
+        return RingGeometry.appPetalPath(index: index, count: apps.count)
     }
 
     private func drawDisk() {
@@ -830,9 +823,9 @@ enum RingApp {
         if let path = appHighlightPath, let context = NSGraphicsContext.current?.cgContext {
             NSGraphicsContext.saveGraphicsState()
             // Keep tint outside glass refraction, between the center inset and rim.
-            // Floating icons retain their independent lift animation.
             context.addPath(path)
-            NSColor.controlAccentColor.withAlphaComponent(dark ? 0.09 : 0.045).setFill()
+            let color = accent.blended(withFraction: dark ? 0.64 : 0.10, of: .black) ?? accent
+            color.withAlphaComponent(dark ? 0.76 : 0.64).setFill()
             context.fillPath()
             NSGraphicsContext.restoreGraphicsState()
         }
@@ -898,17 +891,8 @@ enum RingApp {
         drawSymbol(pending ? "ellipsis" : "xmark", rect: close.insetBy(dx: 5, dy: 5), color: highlighted ? .white : muted)
     }
 
-    private func drawApp(_ app: RingApp, at p: CGPoint, size: Double, highlighted: Bool) {
+    private func drawApp(_ app: RingApp, at p: CGPoint, size: Double) {
         let iconRect = NSRect(x: p.x - size / 2, y: p.y - size / 2, width: size, height: size)
-        if highlighted {
-            let plate = NSBezierPath(roundedRect: iconRect.insetBy(dx: -4, dy: -4), xRadius: 10, yRadius: 10)
-            NSGraphicsContext.saveGraphicsState()
-            let shadow = NSShadow(); shadow.shadowColor = NSColor.black.withAlphaComponent(dark ? 0.28 : 0.16)
-            shadow.shadowBlurRadius = 5; shadow.shadowOffset = NSSize(width: 0, height: -2); shadow.set()
-            NSColor.white.withAlphaComponent(dark ? 0.15 : 0.55).setFill(); plate.fill()
-            NSGraphicsContext.restoreGraphicsState()
-            NSColor.white.withAlphaComponent(dark ? 0.22 : 0.8).setStroke(); plate.lineWidth = 0.7; plate.stroke()
-        }
         let dragged = draggedApp.map { $0.pid == app.running?.pid } ?? false
         app.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: dragged ? 0.25 : (app.available ? 1 : 0.45))
         if let pid = app.running?.pid, let badge = itemCounts[pid]?.badge { drawBadge(badge, on: iconRect) }
@@ -925,13 +909,13 @@ enum RingApp {
             let fresh = appTiles[app.id] == nil
             let tile = appTiles[app.id] ?? RingTile(glass: false)
             if fresh { appTiles[app.id] = tile; appGroup.addSubview(tile) }
-            let p = RingGeometry.point(angle: RingGeometry.angle(index: index, count: apps.count), radius: RingGeometry.appRadius)
+            let p = RingGeometry.appIconCenter(index: index, count: apps.count)
             let side = size + 20
             tile.place(in: CGRect(x: p.x - side / 2, y: p.y - side / 2, width: side, height: side))
             let highlighted = app.id == highlightID
-            tile.artwork.render = { [weak self] in self?.drawApp(app, at: p, size: size, highlighted: highlighted) }
+            tile.artwork.render = { [weak self] in self?.drawApp(app, at: p, size: size) }
             tile.update(highlighted: highlighted, animated: window?.isVisible == true)
-            if fresh, window?.isVisible == true { tile.reveal(index: index, count: apps.count, secondary: false) }
+            if fresh, window?.isVisible == true { tile.reveal(index: index, count: apps.count) }
         }
         let windows = visibleWindows
         let windowIDs = Set(windows.map(\.id))
@@ -944,7 +928,7 @@ enum RingApp {
             tile.place(in: shape.boundingBoxOfPath.integral, shape: shape)
             tile.artwork.render = { [weak self] in self?.drawWindow(win, index: index) }
             tile.update(highlighted: win.id == hoveredWindow || win.id == hoveredClose, animated: window?.isVisible == true)
-            if fresh, window?.isVisible == true { tile.reveal(index: index, count: windows.count, secondary: true) }
+            if fresh, window?.isVisible == true { tile.reveal(index: index, count: windows.count) }
         }
     }
 
@@ -953,13 +937,13 @@ enum RingApp {
         RingMotion.open(self)
         let apps = visibleRingApps
         for (index, app) in apps.enumerated() {
-            appTiles[app.id]?.reveal(index: index, count: apps.count, secondary: false)
+            appTiles[app.id]?.reveal(index: index, count: apps.count)
         }
     }
 
     private func drawCenter() {
         let c = RingGeometry.center
-        let radius = Self.centerRadius
+        let radius = RingGeometry.appCenterRadius
         let inset = NSBezierPath(ovalIn: CGRect(x: c.x - radius, y: c.y - radius, width: radius * 2, height: radius * 2))
         NSColor.labelColor.withAlphaComponent(dark ? 0.055 : 0.025).setFill(); inset.fill()
         NSColor.white.withAlphaComponent(dark ? 0.04 : 0.24).setStroke(); inset.lineWidth = 0.6; inset.stroke()
@@ -1039,7 +1023,7 @@ enum RingApp {
         }
         let apps = visibleRingApps
         for (i, app) in apps.enumerated() {
-            let p = RingGeometry.point(angle: RingGeometry.angle(index: i, count: apps.count), radius: RingGeometry.appRadius)
+            let p = RingGeometry.appIconCenter(index: i, count: apps.count)
             let rect = NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48)
             let id = app.favorite.map { "favorite:\($0.app.id)" } ?? "app:\(app.running?.pid ?? 0)"
             if let running = app.running {
