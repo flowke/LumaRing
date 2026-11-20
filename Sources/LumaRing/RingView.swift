@@ -1,9 +1,34 @@
 import AppKit
 import LumaRingCore
 
+enum RingApp {
+    enum ID: Hashable { case running(pid_t), favorite(String) }
+    case running(AppRecord)
+    case favorite(LauncherRecord, running: AppRecord?)
+
+    var running: AppRecord? {
+        switch self { case .running(let app): app; case .favorite(_, let app): app }
+    }
+    var favorite: LauncherRecord? {
+        if case .favorite(let record, _) = self { return record }
+        return nil
+    }
+    var id: ID {
+        switch self { case .running(let app): .running(app.pid); case .favorite(let record, _): .favorite(record.app.id) }
+    }
+    var name: String {
+        switch self { case .running(let app): app.name; case .favorite(let record, _): record.app.name }
+    }
+    var icon: NSImage {
+        switch self { case .running(let app): app.icon; case .favorite(let record, let app): app?.icon ?? record.icon }
+    }
+    var available: Bool { running != nil || favorite?.available == true }
+}
+
 @MainActor final class RingView: NSView {
     private static let centerRadius = 52.0
     var apps: [AppRecord] = []
+    var additionalFavoriteProcesses: Set<pid_t> = []
     var windows: [WindowRecord] = []
     var appPage = 0
     var windowPage = 0
@@ -23,8 +48,10 @@ import LumaRingCore
     var onCloseWindow: ((WindowRecord) -> Void)?
     var launcherApps: [LauncherRecord] = []
     var launcherPage = 0
+    var runningAppPage = 0
     var hoveredLauncher: String?
     var showsLauncher = false
+    var showsActionLauncher: Bool { showsLauncher && launcherInnerArtwork != nil }
     var optionPressed = false
     var launcherPinned = false
     var launcherInnerArtwork: ((Bool) -> Void)?
@@ -36,6 +63,7 @@ import LumaRingCore
     var makeWindowMenu: ((WindowRecord) -> NSMenu)?
     var onLaunchApp: ((LauncherApp) -> Void)?
     var onLauncherModeEntered: (() -> Void)?
+    var onLauncherModeEnded: (() -> Void)?
     var makeAppMenu: ((AppRecord) -> NSMenu)?
     var onQuitApp: ((AppRecord) -> Void)?
     var onPointerInteraction: (() -> Void)?
@@ -45,13 +73,13 @@ import LumaRingCore
     var onVisibleAppsChanged: (() -> Void)?
     private(set) var itemCounts: [pid_t: AppItemCount] = [:]
     private var countsFromSelection: Set<pid_t> = []
-    private var hoveredApp: pid_t?
+    private var hoveredApp: RingApp.ID?
     private var keyboardPointer: CGPoint?
     private(set) var keyboardSecondary = false
     private var pendingSecondary = false
     private var collapseWork: DispatchWorkItem?
     private enum PressTarget {
-        case app(AppRecord, WindowRecord?, draggable: Bool)
+        case app(RingApp, WindowRecord?, draggable: Bool)
         case window(WindowRecord)
         case close(WindowRecord)
         case background
@@ -69,7 +97,7 @@ import LumaRingCore
     }
     private var draggedApp: AppRecord? {
         guard isDraggingApp, case .app(let app, _, _) = pressTarget else { return nil }
-        return app
+        return app.running
     }
     private let diskMaterial = RingMaterial()
     private let diskArtwork = RingArtwork()
@@ -77,7 +105,7 @@ import LumaRingCore
     private let dragArtwork = RingArtwork()
     private let arcGroup = NSView()
     private let appGroup = NSView()
-    private var appTiles: [pid_t: RingTile] = [:]
+    private var appTiles: [RingApp.ID: RingTile] = [:]
     private var windowTiles: [String: RingTile] = [:]
     private let accessibleItems = RingAccessibility()
 
@@ -112,13 +140,13 @@ import LumaRingCore
         refreshArtwork()
     }
 
-    var showsWindowArc: Bool { !showsLauncher && !isDraggingApp && selectedApp != nil && (windows.count > 1 || (keepsSingleWindowArc && !windows.isEmpty)) }
+    var showsWindowArc: Bool { !showsActionLauncher && !isDraggingApp && selectedApp != nil && (windows.count > 1 || (keepsSingleWindowArc && !windows.isEmpty)) }
     var arcAnchor: Double {
-        let index = visibleApps.firstIndex { $0.pid == selectedApp } ?? 0
-        return RingGeometry.angle(index: index, count: visibleApps.count)
+        let index = visibleRingApps.firstIndex { $0.running?.pid == selectedApp } ?? 0
+        return RingGeometry.angle(index: index, count: visibleRingApps.count)
     }
     private var diskPath: CGPath {
-        showsLauncher
+        showsActionLauncher
             ? CGPath(ellipseIn: CGRect(x: 42, y: 42, width: 396, height: 396), transform: nil)
             : RingGeometry.diskPath
     }
@@ -139,8 +167,8 @@ import LumaRingCore
     var windowPageSize: Int {
         min(RingGeometry.windowPageSizeRange.upperBound, max(RingGeometry.windowPageSizeRange.lowerBound, options.windowPageSize))
     }
-    var appIconSize: Double { min(34, 2 * RingGeometry.appRadius * sin(.pi / Double(max(visibleApps.count, 2))) * 0.76) }
-    private var appPages: Int { RingGeometry.pageCount(total: apps.count, size: appPageSize) }
+    var appIconSize: Double { min(34, 2 * RingGeometry.appRadius * sin(.pi / Double(max(visibleRingApps.count, 2))) * 0.76) }
+    private var appPages: Int { RingGeometry.pageCount(total: ringApps.count, size: appPageSize) }
     private var windowPages: Int { RingGeometry.pageCount(total: windows.count, size: windowPageSize) }
     private func windowPoint(_ index: Int) -> CGPoint {
         RingGeometry.point(angle: RingGeometry.arcAngle(index: index, count: visibleWindows.count, anchor: arcAnchor), radius: RingGeometry.windowRadius)
@@ -160,16 +188,22 @@ import LumaRingCore
         visibleWindows.enumerated().first { closeButtonRect(at: $0.offset).contains(point) }?.element
     }
 
-    private func appTarget(at point: CGPoint) -> AppRecord? {
-        guard let index = RingGeometry.appIndex(at: point, count: visibleApps.count) else { return nil }
-        return visibleApps[index]
+    private func appTarget(at point: CGPoint) -> RingApp? {
+        let apps = visibleRingApps
+        guard let index = RingGeometry.appIndex(at: point, count: apps.count) else { return nil }
+        return apps[index]
     }
 
-    private var pageControlsRect: CGRect {
+    var pageControlsRect: CGRect {
         CGRect(x: RingGeometry.center.x - 22, y: RingGeometry.center.y - 32, width: 44, height: 14)
     }
     var highlightedApp: pid_t? {
-        hoveredApp ?? ((hoveredWindow != nil || hoveredClose != nil) ? selectedApp : nil)
+        highlightedTile?.running?.pid
+    }
+    private var highlightedTile: RingApp? {
+        if let hoveredApp { return visibleRingApps.first { $0.id == hoveredApp } }
+        guard let selectedApp, hoveredWindow != nil || hoveredClose != nil else { return nil }
+        return visibleRingApps.first { $0.running?.pid == selectedApp }
     }
 
     private var tracking: NSTrackingArea?
@@ -184,9 +218,21 @@ import LumaRingCore
     override func hitTest(_ point: NSPoint) -> NSView? {
         bounds.contains(convert(point, from: superview)) ? self : nil
     }
-    var visibleApps: [AppRecord] {
-        Array(apps[RingGeometry.pageRange(page: appPage, total: apps.count, size: appPageSize)])
+    private var ringApps: [RingApp] {
+        if showsLauncher {
+            var running: [String: AppRecord] = [:]
+            for app in apps where running[app.bundleID] == nil { running[app.bundleID] = app }
+            return launcherApps.map { .favorite($0, running: running[$0.app.bundleID]) }
+        }
+        let excluded = Set(options.excludedBundleIDs)
+        return apps.filter { !excluded.contains($0.bundleID) && !additionalFavoriteProcesses.contains($0.pid) }.map(RingApp.running)
     }
+    var visibleRingApps: [RingApp] {
+        let apps = ringApps
+        return Array(apps[RingGeometry.pageRange(page: appPage, total: apps.count, size: appPageSize)])
+    }
+    var visibleApps: [AppRecord] { visibleRingApps.compactMap(\.running) }
+    func clampAppPage() { appPage = min(appPage, appPages - 1) }
     var visibleWindows: [WindowRecord] {
         guard showsWindowArc else { return [] }
         return Array(windows[RingGeometry.pageRange(page: windowPage, total: windows.count, size: windowPageSize)])
@@ -209,10 +255,11 @@ import LumaRingCore
         cancelPointerInteraction()
         onHoverWindow?(nil)
         self.apps = apps; self.options = options
+        additionalFavoriteProcesses.removeAll()
         showsLauncher = false; optionPressed = false; launcherApps = []; launcherPage = 0; hoveredLauncher = nil
         itemCounts.removeAll()
         countsFromSelection.removeAll()
-        windows = []; appPage = 0; windowPage = 0
+        windows = []; appPage = 0; runningAppPage = 0; windowPage = 0
         selectedApp = nil; hoveredApp = nil; hoveredWindow = nil
         message = apps.isEmpty ? L10n.text("没有可切换的应用", "No apps available") : L10n.text("悬停应用", "Point at an app")
         loading = false
@@ -224,9 +271,19 @@ import LumaRingCore
     }
 
     func select(_ app: AppRecord) {
-        guard !showsLauncher, !isEditingName else { return }
+        guard let tile = visibleRingApps.first(where: { $0.running?.pid == app.pid }) else { return }
+        select(tile)
+    }
+
+    private func select(_ tile: RingApp) {
+        guard !showsActionLauncher, !isEditingName else { return }
         cancelHover()
-        if hoveredApp != app.pid { hoveredApp = app.pid; refreshArtwork() }
+        guard let app = tile.running else {
+            if selectedApp != nil { clearSelection(preserveKeyboard: true) }
+            if hoveredApp != tile.id { hoveredApp = tile.id; refreshArtwork() }
+            return
+        }
+        if hoveredApp != tile.id { hoveredApp = tile.id; refreshArtwork() }
         guard selectedApp != app.pid else { return }
         keepsSingleWindowArc = false
         selectedApp = app.pid; windows = []; windowPage = 0
@@ -238,7 +295,7 @@ import LumaRingCore
     }
 
     func setWindows(_ result: WindowResult, for pid: pid_t) {
-        guard !showsLauncher, !isEditingName, selectedApp == pid else { return }
+        guard !showsActionLauncher, !isEditingName, selectedApp == pid else { return }
         // A direct hover query takes precedence over a potentially older page-count response.
         countsFromSelection.insert(pid)
         itemCounts[pid] = AppItemCount(result, includeMinimized: options.includeMinimized)
@@ -329,7 +386,7 @@ import LumaRingCore
             centerClickWork?.cancel(); centerClickWork = nil
         }
         guard !isPointerDown, !isContextMenuOpen, !isEditingName else { return }
-        if showsLauncher {
+        if showsActionLauncher {
             let id = launcherTarget(at: p)?.app.id
             if id != hoveredLauncher { hoveredLauncher = id; refreshArtwork() }
             return
@@ -343,7 +400,7 @@ import LumaRingCore
         }
         if selectingWithShortcut {
             if radius < RingGeometry.appInner {
-                if selectedApp != nil { clearSelection() }
+                if highlightedTile != nil || selectedApp != nil { clearSelection() }
                 return
             }
             if showsWindowArc, let index = RingGeometry.arcIndex(at: p, count: visibleWindows.count, anchor: arcAnchor,
@@ -359,22 +416,20 @@ import LumaRingCore
                 return
             }
         }
-        if let index = RingGeometry.appIndex(at: p, count: visibleApps.count) {
-            collapseWork?.cancel(); collapseWork = nil
-            let app = visibleApps[index]
-            if hoveredApp != app.pid { hoveredApp = app.pid; refreshArtwork() }
+        let apps = visibleRingApps
+        if let index = RingGeometry.appIndex(at: p, count: apps.count) {
             if hoveredWindow != nil { setHoveredWindow(nil) }
-            if selectedApp != app.pid { select(app) }
+            select(apps[index])
         } else {
             if let index = windowIndex(at: p) {
                 collapseWork?.cancel(); collapseWork = nil
                 setHoveredWindow(visibleWindows[index])
-            } else if selectingWithShortcut, let index = RingGeometry.index(at: p, count: visibleApps.count,
+            } else if selectingWithShortcut, let index = RingGeometry.index(at: p, count: apps.count,
                 inner: RingGeometry.appOuter, outer: .infinity) {
                 // Hold-to-select extends each app's sector beyond the visible ring.
                 // The expanded secondary arc above retains priority over this extension.
                 setHoveredWindow(nil)
-                select(visibleApps[index])
+                select(apps[index])
             } else {
                 let angle = atan2(p.y - RingGeometry.center.y, p.x - RingGeometry.center.x)
                 let distance = abs(atan2(sin(angle - arcAnchor), cos(angle - arcAnchor)))
@@ -399,9 +454,9 @@ import LumaRingCore
         }
     }
 
-    func clearSelection() {
+    func clearSelection(preserveKeyboard: Bool = false) {
         guard !isEditingName else { return }
-        endKeyboardNavigation()
+        if !preserveKeyboard { endKeyboardNavigation() }
         cancelHover()
         keepsSingleWindowArc = false
         selectedApp = nil; hoveredApp = nil; windows = []; hoveredWindow = nil; hoveredClose = nil
@@ -414,7 +469,7 @@ import LumaRingCore
         guard keyboardPointer != NSEvent.mouseLocation else { return }
         if selectingWithShortcut { updateHover(at: point(event)); return }
         endKeyboardNavigation()
-        if showsLauncher { hoveredLauncher = nil; refreshArtwork() }
+        if showsActionLauncher { hoveredLauncher = nil; refreshArtwork() }
         else if !isPointerDown && !isContextMenuOpen && !isEditingName { clearSelection() }
     }
 
@@ -458,18 +513,18 @@ import LumaRingCore
         cancelPointerInteraction()
         cancelHover()
         pressPoint = p; dragPoint = p
-        if showsLauncher {
+        if showsActionLauncher {
             pressTarget = launcherTarget(at: p).map { .launcher($0) } ?? .inactive
             return
         }
         if let target = closeTarget(at: p) { pressTarget = .close(target) }
         else if let index = windowIndex(at: p) { pressTarget = .window(visibleWindows[index]) }
-        else if let app = appTarget(at: p), let index = visibleApps.firstIndex(where: { $0.pid == app.pid }) {
-            let center = RingGeometry.point(angle: RingGeometry.angle(index: index, count: visibleApps.count), radius: RingGeometry.appRadius)
+        else if let app = appTarget(at: p), let index = visibleRingApps.firstIndex(where: { $0.id == app.id }) {
+            let center = RingGeometry.point(angle: RingGeometry.angle(index: index, count: visibleRingApps.count), radius: RingGeometry.appRadius)
             let hitSize = appIconSize + 12
             let icon = CGRect(x: center.x - hitSize / 2, y: center.y - hitSize / 2, width: hitSize, height: hitSize)
-            let target = selectedApp == app.pid && windows.count == 1 ? windows[0] : nil
-            pressTarget = .app(app, target, draggable: icon.contains(p))
+            let target = selectedApp == app.running?.pid && windows.count == 1 ? windows[0] : nil
+            pressTarget = .app(app, target, draggable: app.running != nil && icon.contains(p))
         } else { pressTarget = .background }
         refreshArtwork()
     }
@@ -491,7 +546,7 @@ import LumaRingCore
         guard let target = pressTarget else { return }
         movePointer(to: p)
         let dragged = isDraggingApp, quit = dragWillQuit
-        if dragged, quit, case .app(let app, _, _) = target,
+        if dragged, quit, case .app(let tile, _, _) = target, let app = tile.running,
            apps.contains(where: { $0.pid == app.pid }), let onQuitApp {
             // Hand the drop straight to dismissal; don't restore/rebuild the arc
             // for one frame before the panel disappears.
@@ -503,13 +558,11 @@ import LumaRingCore
         refresh()
         switch target {
         case .app(let app, let singleWindow, _):
-            guard apps.contains(where: { $0.pid == app.pid }) else { return }
             if dragged {
-                if quit { onQuitApp?(app) }
+                if quit, let running = app.running, apps.contains(where: { $0.pid == running.pid }) { onQuitApp?(running) }
                 else { updateHover(at: p) }
-            } else if appTarget(at: p)?.pid == app.pid {
-                if let singleWindow { onActivateWindow?(singleWindow) }
-                else { onActivateApp?(app) }
+            } else if let current = appTarget(at: p), current.id == app.id {
+                activateApp(current, singleWindow: current.running?.pid == app.running?.pid ? singleWindow : nil)
             }
         case .close(let record):
             if closeTarget(at: p)?.id == record.id { onCloseWindow?(record) }
@@ -518,9 +571,9 @@ import LumaRingCore
                 onActivateWindow?(record)
             }
         case .launcher(let record):
-            if showsLauncher, record.available, launcherTarget(at: p)?.app.id == record.app.id { onLaunchApp?(record.app) }
+            if showsActionLauncher, record.available, launcherTarget(at: p)?.app.id == record.app.id { onLaunchApp?(record.app) }
         case .inactive:
-            if showsLauncher, launcherTarget(at: p) == nil, hypot(p.x - pressPoint.x, p.y - pressPoint.y) < 6 { activateLauncher(at: p) }
+            if showsActionLauncher, launcherTarget(at: p) == nil, hypot(p.x - pressPoint.x, p.y - pressPoint.y) < 6 { activateLauncher(at: p) }
         case .background:
             // A late hover response must not turn a background press into a new target.
             if hypot(p.x - pressPoint.x, p.y - pressPoint.y) < 6,
@@ -537,15 +590,13 @@ import LumaRingCore
     }
 
     func activate(at p: CGPoint) {
-        if showsLauncher { activateLauncher(at: p); return }
+        if showsActionLauncher { activateLauncher(at: p); return }
         if let target = closeTarget(at: p) { onCloseWindow?(target); return }
         if let index = windowIndex(at: p) {
             onActivateWindow?(visibleWindows[index]); return
         }
-        if let index = RingGeometry.appIndex(at: p, count: visibleApps.count) {
-            let app = visibleApps[index]
-            if selectedApp == app.pid, windows.count == 1 { onActivateWindow?(windows[0]) }
-            else { onActivateApp?(app) }
+        if let app = appTarget(at: p) {
+            activateApp(app, singleWindow: selectedApp == app.running?.pid && windows.count == 1 ? windows[0] : nil)
             return
         }
         let radius = hypot(p.x - RingGeometry.center.x, p.y - RingGeometry.center.y)
@@ -553,17 +604,25 @@ import LumaRingCore
             if pageControlsRect.contains(p) {
                 if showsWindowArc && windowPages > 1 { changeWindowPage(p.x < RingGeometry.center.x ? -1 : 1) }
                 else if appPages > 1 { changeAppPage(p.x < RingGeometry.center.x ? -1 : 1) }
-            } else if !AXIsProcessTrusted() { scheduleCenterSettings() }
+            } else if !AXIsProcessTrusted() || (showsLauncher && launcherApps.isEmpty) { scheduleCenterSettings() }
             return
         }
         onClose?()
     }
 
+    private func activateApp(_ tile: RingApp, singleWindow: WindowRecord? = nil) {
+        if let favorite = tile.favorite, favorite.available { onLaunchApp?(favorite.app) }
+        else if let running = tile.running {
+            if let singleWindow { onActivateWindow?(singleWindow) }
+            else { onActivateApp?(running) }
+        }
+    }
+
     func contextMenu(at p: CGPoint) -> NSMenu? {
-        guard !showsLauncher, !isPointerDown, !isEditingName else { return nil }
+        guard !showsActionLauncher, !isPointerDown, !isEditingName else { return nil }
         if let record = closeTarget(at: p) { return makeWindowMenu?(record) }
         if let index = windowIndex(at: p) { return makeWindowMenu?(visibleWindows[index]) }
-        if let app = appTarget(at: p) { return makeAppMenu?(app) }
+        if let app = appTarget(at: p)?.running { return makeAppMenu?(app) }
         return nil
     }
 
@@ -580,7 +639,7 @@ import LumaRingCore
 
     override func rightMouseDown(with event: NSEvent) {
         guard acceptsPointerEvent(event) else { return }
-        guard !showsLauncher, !isPointerDown, !isEditingName else { return }
+        guard !showsActionLauncher, !isPointerDown, !isEditingName else { return }
         guard let menu = contextMenu(at: point(event)) else { return }
         onPointerInteraction?()
         cancelHover()
@@ -614,24 +673,19 @@ import LumaRingCore
         let p = point(event)
         let delta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
         let direction = delta < 0 ? 1 : -1
-        if showsLauncher { changeLauncherPage(direction); return }
+        if showsActionLauncher { changeLauncherPage(direction); return }
         if hypot(p.x - RingGeometry.center.x, p.y - RingGeometry.center.y) >= RingGeometry.windowInner, showsWindowArc {
             changeWindowPage(direction)
         } else { changeAppPage(direction) }
     }
 
     func changeAppPage(_ direction: Int) {
-        guard !showsLauncher else { return }
+        guard !showsActionLauncher else { return }
         cancelPointerInteraction()
-        guard RingGeometry.pageCount(total: apps.count, size: appPageSize) > 1 else { return }
-        cancelHover()
-        appPage = RingGeometry.wrapped(appPage + direction, count: RingGeometry.pageCount(total: apps.count, size: appPageSize))
+        guard appPages > 1 else { return }
+        appPage = RingGeometry.wrapped(appPage + direction, count: appPages)
         countsFromSelection.removeAll()
-        keepsSingleWindowArc = false
-        selectedApp = nil; hoveredApp = nil; windows = []; hoveredWindow = nil
-        loading = false
-        onHoverWindow?(nil); message = L10n.text("悬停应用", "Point at an app")
-        refresh()
+        clearSelection()
         onVisibleAppsChanged?()
     }
 
@@ -644,7 +698,7 @@ import LumaRingCore
 
     // Normal Escape dismissal is handled by RingController; pointer cancellation stays local.
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53, showsLauncher {
+        if event.keyCode == 53, showsActionLauncher {
             endLauncherMode(); return
         }
         if event.keyCode == 53, isPointerDown {
@@ -668,7 +722,7 @@ import LumaRingCore
         switch command {
         case .step(let direction):
             pendingSecondary = false
-            if showsLauncher {
+            if showsActionLauncher {
                 let current = launcherApps.firstIndex { $0.app.id == hoveredLauncher }
                 guard let next = RingNavigation.next(current: current, pageStart: launcherPage * 12,
                     total: launcherApps.count, direction: direction) else { return }
@@ -687,7 +741,8 @@ import LumaRingCore
                 if changedPage { refresh() }
                 setHoveredWindow(windows[next])
             } else {
-                let current = apps.firstIndex { $0.pid == hoveredApp }
+                let apps = ringApps
+                let current = apps.firstIndex { $0.id == hoveredApp }
                 guard let next = RingNavigation.next(current: current, pageStart: appPage * appPageSize,
                     total: apps.count, direction: direction) else { return }
                 let page = next / appPageSize
@@ -695,31 +750,32 @@ import LumaRingCore
                 if changed {
                     countsFromSelection.removeAll()
                     appPage = page
+                    clearSelection(preserveKeyboard: true)
                 }
                 select(apps[next])
                 if changed { onVisibleAppsChanged?() }
             }
         case .toggleSecondary:
-            guard !showsLauncher else { return }
+            guard !showsActionLauncher else { return }
             if keyboardSecondary || hoveredWindow != nil || pendingSecondary {
                 pendingSecondary = false
                 keyboardSecondary = false
                 setHoveredWindow(nil)
-                hoveredApp = selectedApp
+                hoveredApp = visibleRingApps.first { $0.running?.pid == selectedApp }?.id
                 refresh()
             } else if loading, selectedApp != nil {
                 // Pressing again before the query finishes cancels entry.
                 pendingSecondary = true
             } else { enterSecondary() }
         case .activate:
-            if showsLauncher {
+            if showsActionLauncher {
                 if let record = launcherApps.first(where: { $0.app.id == hoveredLauncher }), record.available {
                     onLaunchApp?(record.app)
                 }
             } else if let record = currentWindow {
                 if !closingWindowIDs.contains(record.id) { onActivateWindow?(record) }
-            } else if let app = apps.first(where: { $0.pid == hoveredApp }) {
-                onActivateApp?(app)
+            } else if let tile = highlightedTile {
+                activateApp(tile)
             }
         }
     }
@@ -732,11 +788,18 @@ import LumaRingCore
     }
 
     func activateHovered() {
-        guard !isEditingName, !showsLauncher, !isContextMenuOpen, !isPointerDown, hoveredClose == nil else { return }
+        guard !isEditingName, !isContextMenuOpen, !isPointerDown, hoveredClose == nil else { return }
+        if showsActionLauncher {
+            if let record = launcherApps.first(where: { $0.app.id == hoveredLauncher }), record.available {
+                onLaunchApp?(record.app)
+            } else {
+                onClose?()
+            }
+            return
+        }
         if let window = currentWindow { onActivateWindow?(window) }
-        else if let pid = hoveredApp, let app = apps.first(where: { $0.pid == pid }) {
-            if selectedApp == pid, windows.count == 1 { onActivateWindow?(windows[0]) }
-            else { onActivateApp?(app) }
+        else if let tile = highlightedTile, tile.available {
+            activateApp(tile, singleWindow: selectedApp == tile.running?.pid && windows.count == 1 ? windows[0] : nil)
         } else { onClose?() }
     }
 
@@ -746,23 +809,24 @@ import LumaRingCore
     private var dark: Bool { diskArtwork.effectiveAppearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua }
 
     var appHighlightPath: CGPath? {
-        guard !isDraggingApp, let pid = highlightedApp, let index = visibleApps.firstIndex(where: { $0.pid == pid }) else { return nil }
+        let apps = visibleRingApps
+        guard !isDraggingApp, let tile = highlightedTile, let index = apps.firstIndex(where: { $0.id == tile.id }) else { return nil }
         let inner = Self.centerRadius + 0.5, outer = RingGeometry.appOuter - 0.75
-        if selectingWithShortcut, showsWindowArc, pid == selectedApp,
-           RingGeometry.arcHalfAngle(count: visibleWindows.count) > .pi / Double(visibleApps.count) {
+        if selectingWithShortcut, showsWindowArc, tile.running?.pid == selectedApp,
+           RingGeometry.arcHalfAngle(count: visibleWindows.count) > .pi / Double(apps.count) {
             return RingGeometry.arcPath(count: visibleWindows.count, anchor: arcAnchor,
                 inner: inner, outer: outer)
         }
-        return RingGeometry.sectorPath(index: index, count: visibleApps.count, inner: inner, outer: outer)
+        return RingGeometry.sectorPath(index: index, count: apps.count, inner: inner, outer: outer)
     }
 
     private func drawDisk() {
-        if showsLauncher { drawLauncher(); return }
+        if showsActionLauncher { drawLauncher(); return }
         drawCenter()
     }
 
     private func drawAppHighlight() {
-        guard !showsLauncher else { return }
+        guard !showsActionLauncher else { return }
         if let path = appHighlightPath, let context = NSGraphicsContext.current?.cgContext {
             NSGraphicsContext.saveGraphicsState()
             // Keep tint outside glass refraction, between the center inset and rim.
@@ -834,11 +898,9 @@ import LumaRingCore
         drawSymbol(pending ? "ellipsis" : "xmark", rect: close.insetBy(dx: 5, dy: 5), color: highlighted ? .white : muted)
     }
 
-    private func drawApp(_ app: AppRecord, index: Int) {
-        let p = RingGeometry.point(angle: RingGeometry.angle(index: index, count: visibleApps.count), radius: RingGeometry.appRadius)
-        let size = appIconSize
+    private func drawApp(_ app: RingApp, at p: CGPoint, size: Double, highlighted: Bool) {
         let iconRect = NSRect(x: p.x - size / 2, y: p.y - size / 2, width: size, height: size)
-        if highlightedApp == app.pid, !isDraggingApp {
+        if highlighted {
             let plate = NSBezierPath(roundedRect: iconRect.insetBy(dx: -4, dy: -4), xRadius: 10, yRadius: 10)
             NSGraphicsContext.saveGraphicsState()
             let shadow = NSShadow(); shadow.shadowColor = NSColor.black.withAlphaComponent(dark ? 0.28 : 0.16)
@@ -847,24 +909,28 @@ import LumaRingCore
             NSGraphicsContext.restoreGraphicsState()
             NSColor.white.withAlphaComponent(dark ? 0.22 : 0.8).setStroke(); plate.lineWidth = 0.7; plate.stroke()
         }
-        app.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: draggedApp?.pid == app.pid ? 0.25 : 1)
-        if let badge = itemCounts[app.pid]?.badge { drawBadge(badge, on: iconRect) }
+        let dragged = draggedApp.map { $0.pid == app.running?.pid } ?? false
+        app.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: dragged ? 0.25 : (app.available ? 1 : 0.45))
+        if let pid = app.running?.pid, let badge = itemCounts[pid]?.badge { drawBadge(badge, on: iconRect) }
     }
 
     private func updateTiles() {
-        appGroup.isHidden = showsLauncher
-        let apps = showsLauncher ? [] : visibleApps
-        let appIDs = Set(apps.map(\.pid))
+        appGroup.isHidden = showsActionLauncher
+        let apps = showsActionLauncher ? [] : visibleRingApps
+        let appIDs = Set(apps.map(\.id))
+        let size = appIconSize
+        let highlightID = isDraggingApp ? nil : highlightedTile?.id
         for id in appTiles.keys.filter({ !appIDs.contains($0) }) { appTiles.removeValue(forKey: id)?.removeFromSuperview() }
         for (index, app) in apps.enumerated() {
-            let fresh = appTiles[app.pid] == nil
-            let tile = appTiles[app.pid] ?? RingTile(glass: false)
-            if fresh { appTiles[app.pid] = tile; appGroup.addSubview(tile) }
+            let fresh = appTiles[app.id] == nil
+            let tile = appTiles[app.id] ?? RingTile(glass: false)
+            if fresh { appTiles[app.id] = tile; appGroup.addSubview(tile) }
             let p = RingGeometry.point(angle: RingGeometry.angle(index: index, count: apps.count), radius: RingGeometry.appRadius)
-            let side = appIconSize + 20
+            let side = size + 20
             tile.place(in: CGRect(x: p.x - side / 2, y: p.y - side / 2, width: side, height: side))
-            tile.artwork.render = { [weak self] in self?.drawApp(app, index: index) }
-            tile.update(highlighted: app.pid == highlightedApp && !isDraggingApp, animated: window?.isVisible == true)
+            let highlighted = app.id == highlightID
+            tile.artwork.render = { [weak self] in self?.drawApp(app, at: p, size: size, highlighted: highlighted) }
+            tile.update(highlighted: highlighted, animated: window?.isVisible == true)
             if fresh, window?.isVisible == true { tile.reveal(index: index, count: apps.count, secondary: false) }
         }
         let windows = visibleWindows
@@ -885,8 +951,9 @@ import LumaRingCore
     func animateOpening() {
         layoutSubtreeIfNeeded()
         RingMotion.open(self)
-        for (index, app) in visibleApps.enumerated() {
-            appTiles[app.pid]?.reveal(index: index, count: visibleApps.count, secondary: false)
+        let apps = visibleRingApps
+        for (index, app) in apps.enumerated() {
+            appTiles[app.id]?.reveal(index: index, count: apps.count, secondary: false)
         }
     }
 
@@ -902,11 +969,21 @@ import LumaRingCore
                 titleColor: ink, detailColor: dragWillQuit ? .systemRed : muted)
             return
         }
-        let app = apps.first { $0.pid == hoveredApp } ?? currentApp
-        let name = app?.name ?? (apps.isEmpty ? L10n.text("暂无应用", "No apps") : L10n.text("应用", "Apps"))
+        let app = highlightedTile ?? visibleRingApps.first { $0.running?.pid == selectedApp && selectedApp != nil }
+        let name = app?.name ?? (showsLauncher ? L10n.text("常用应用", "Favorites") : L10n.text("运行中的应用", "Running apps"))
         let paging = (showsWindowArc && windowPages > 1) || appPages > 1
-        let detail = selectingWithShortcut && highlightedApp != nil
-            ? L10n.text("松开快捷键切换", "Release to switch") : (app == nil || loading ? "" : message)
+        let detail: String
+        if let app {
+            if !app.available { detail = L10n.text("找不到应用", "App not found") }
+            else if selectingWithShortcut && highlightedTile != nil { detail = L10n.text("松开快捷键切换", "Release to switch") }
+            else if app.running == nil { detail = L10n.text("点击打开", "Click to open") }
+            else { detail = loading ? "" : message }
+        } else if showsLauncher {
+            detail = launcherApps.isEmpty ? L10n.text("点击添加 · 双击切换", "Click to add · Double-click to switch")
+                : L10n.text("双击中心切换", "Double-click to switch")
+        } else {
+            detail = L10n.text("双击中心显示常用应用", "Double-click center for favorites")
+        }
         RingCenterLabel.draw(title: name, detail: detail,
                              paging: paging, titleColor: ink, detailColor: muted)
         if paging {
@@ -933,15 +1010,16 @@ import LumaRingCore
     private func rebuildAccessibility() {
         guard window != nil else { accessibleItems.clear(in: self); return }
         var items: [RingAccessibility.Entry] = []
+        let c = RingGeometry.center
         func add(_ id: String, _ label: String, help: String, rect: NSRect, enabled: Bool = true, action: @escaping () -> Void) {
             items.append(.init(id: id, label: label, help: help, rect: rect, enabled: enabled, action: action))
         }
-        if showsLauncher {
+        if showsActionLauncher {
             for (i, record) in visibleLauncherApps.enumerated() {
                 let p = launcherPoint(i)
                 add("launcher:\(record.app.id)", record.app.name, help: L10n.text("打开应用", "Open app"),
                     rect: NSRect(x: p.x - 22, y: p.y - 22, width: 44, height: 44), enabled: record.available) { [weak self] in
-                    guard let self, self.showsLauncher, record.available else { return }
+                    guard let self, self.showsActionLauncher, record.available else { return }
                     self.onLaunchApp?(record.app)
                 }
             }
@@ -951,21 +1029,38 @@ import LumaRingCore
                         rect: NSRect(x: direction < 0 ? 218 : 240, y: 208, width: 22, height: 14)) { [weak self] in self?.changeLauncherPage(direction) }
                 }
             }
+            add("actions", L10n.text("快捷操作", "Actions"), help: L10n.text("返回快捷操作", "Return to actions"),
+                rect: NSRect(x: c.x - 34, y: c.y + 8, width: 68, height: 24)) { [weak self] in
+                    guard let self, self.showsActionLauncher else { return }
+                    self.endLauncherMode()
+                }
             accessibleItems.update(items, in: self)
             return
         }
-        for (i, app) in visibleApps.enumerated() {
-            let p = RingGeometry.point(angle: RingGeometry.angle(index: i, count: visibleApps.count), radius: RingGeometry.appRadius)
-            let mode = options.contentMode(for: app.bundleID).title
-            let label = itemCounts[app.pid]?.badge.map { "\(app.name), \($0) \(mode)" } ?? app.name
-            add("app:\(app.pid)", label, help: L10n.text("有多个\(mode)时展开圆弧；点击切换，拖出轮盘退出应用。", "Show windows or tabs. Click to switch; drag the app outside the ring to quit."), rect: NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48)) { [weak self] in self?.select(app) }
+        let apps = visibleRingApps
+        for (i, app) in apps.enumerated() {
+            let p = RingGeometry.point(angle: RingGeometry.angle(index: i, count: apps.count), radius: RingGeometry.appRadius)
+            let rect = NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48)
+            let id = app.favorite.map { "favorite:\($0.app.id)" } ?? "app:\(app.running?.pid ?? 0)"
+            if let running = app.running {
+                let mode = options.contentMode(for: running.bundleID).title
+                let label = itemCounts[running.pid]?.badge.map { "\(app.name), \($0) \(mode)" } ?? app.name
+                add(id, label, help: L10n.text("有多个\(mode)时展开圆弧；点击切换，拖出轮盘退出应用。", "Show windows or tabs. Click to switch; drag the app outside the ring to quit."), rect: rect) { [weak self] in
+                    guard let self, let tile = self.visibleRingApps.first(where: { $0.id == app.id }), let running = tile.running else { return }
+                    self.select(running)
+                }
+            } else {
+                add(id, app.name, help: L10n.text("打开应用", "Open app"), rect: rect, enabled: app.available) { [weak self] in
+                    guard let self, let tile = self.visibleRingApps.first(where: { $0.id == app.id }) else { return }
+                    self.activateApp(tile)
+                }
+            }
         }
         for (i, win) in visibleWindows.enumerated() {
             let p = windowPoint(i)
             add("window:\(win.id)", win.displayTitle + (win.minimized ? L10n.text("，已最小化", ", minimized") : ""), help: L10n.text("切换到此\(secondaryName)", "Switch to this item"), rect: NSRect(x: p.x - 35, y: p.y - 29, width: 70, height: 58)) { [weak self] in self?.onActivateWindow?(win) }
             add("close:\(win.id)", L10n.text("关闭 \(win.displayTitle)", "Close \(win.displayTitle)"), help: L10n.text("关闭此窗口或标签页", "Close this window or tab"), rect: closeButtonRect(at: i)) { [weak self] in self?.onCloseWindow?(win) }
         }
-        let c = RingGeometry.center
         if showsWindowArc && windowPages > 1 {
             add("window-previous", L10n.text("上一页\(secondaryName)", "Previous \(secondaryName.lowercased())"), help: L10n.text("圆弧滚动翻页", "Scroll over the arc to change pages"), rect: NSRect(x: pageControlsRect.minX, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeWindowPage(-1) }
             add("window-next", L10n.text("下一页\(secondaryName)", "Next \(secondaryName.lowercased())"), help: L10n.text("圆弧滚动翻页", "Scroll over the arc to change pages"), rect: NSRect(x: c.x, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeWindowPage(1) }
@@ -973,7 +1068,14 @@ import LumaRingCore
             add("app-previous", L10n.text("上一页应用", "Previous apps"), help: L10n.text("滚动或点击翻页", "Scroll or click to change pages"), rect: NSRect(x: pageControlsRect.minX, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeAppPage(-1) }
             add("app-next", L10n.text("下一页应用", "Next apps"), help: L10n.text("滚动或点击翻页", "Scroll or click to change pages"), rect: NSRect(x: c.x, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeAppPage(1) }
         }
-        add("settings", L10n.text("设置", "Settings"), help: L10n.text("打开设置", "Open settings"), rect: NSRect(x: c.x - 30, y: c.y - 15, width: 60, height: 38)) { [weak self] in self?.onSettings?() }
+        add("settings", L10n.text("设置", "Settings"), help: L10n.text("打开设置", "Open settings"), rect: NSRect(x: c.x - 30, y: c.y - 30, width: 60, height: 18)) { [weak self] in self?.onSettings?() }
+        add(showsLauncher ? "running-apps" : "favorites",
+            showsLauncher ? L10n.text("运行中的应用", "Running apps") : L10n.text("常用应用", "Favorites"),
+            help: showsLauncher ? L10n.text("切换到当前正在运行的应用", "Show currently running apps")
+                : L10n.text("切换到已配置的常用应用", "Show configured favorite apps"),
+            rect: NSRect(x: c.x - 30, y: c.y + 8, width: 60, height: 18), enabled: !showsWindowArc) { [weak self] in
+                self?.toggleLauncherFromCenter(at: c)
+            }
         accessibleItems.update(items, in: self)
     }
 }

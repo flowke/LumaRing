@@ -15,6 +15,9 @@ final class LauncherTests: XCTestCase {
         view.launcherApps = records(count)
         return view
     }
+    private func point(_ index: Int, count: Int) -> CGPoint {
+        RingGeometry.point(angle: RingGeometry.angle(index: index, count: count), radius: RingGeometry.appRadius)
+    }
     func testOldPreferencesDefaultToEmptyAndRoundTripPreservesOrder() throws {
         let old = try JSONDecoder().decode(Options.self, from: Data("{}".utf8))
         XCTAssertTrue(old.launcherApps.isEmpty)
@@ -52,50 +55,99 @@ final class LauncherTests: XCTestCase {
         view.isContextMenuOpen = true; view.updateOption(pressed: true)
         XCTAssertFalse(view.showsLauncher)
     }
-    @MainActor func testPendingWindowResultCannotReplaceLauncherAndPrimaryIsDisabled() async {
+    @MainActor func testSwitchingGroupsClearsRunningSelectionAndIgnoresItsLateResult() async {
         let view = view()
         view.select(primary)
-        view.onActivateApp = { _ in XCTFail("Primary disabled") }
-        view.onQuitApp = { _ in XCTFail("Primary disabled") }
-        view.onSelectApp = { _ in XCTFail("Primary disabled") }
+        view.onSelectApp = { _ in XCTFail("A stopped favorite has no window query") }
         view.updateOption(pressed: true)
         view.setWindows(.ready([]), for: 100)
         XCTAssertNil(view.selectedApp); XCTAssertTrue(view.showsLauncher)
-        let point = RingGeometry.point(angle: .pi / 2, radius: 88)
-        view.updateHover(at: point); view.beginPointer(at: point)
-        view.movePointer(to: view.launcherPoint(0)); view.endPointer(at: view.launcherPoint(0))
-        view.activate(at: point); view.activateHovered(); view.select(primary)
+        view.updateHover(at: point(0, count: 3)); view.select(primary)
         XCTAssertNil(view.selectedApp); XCTAssertTrue(view.showsLauncher)
     }
-    @MainActor func testOuterClickRequiresSameAppAndHoldingOptionThroughRelease() async {
+    @MainActor func testFavoriteClickRequiresSameAppAndHoldingOptionThroughRelease() async {
         let view = view()
         var launched: [String] = []
         view.onLaunchApp = { launched.append($0.id) }
         view.updateOption(pressed: true)
-        view.beginPointer(at: view.launcherPoint(0)); view.endPointer(at: view.launcherPoint(1))
+        view.beginPointer(at: point(0, count: 3)); view.endPointer(at: point(1, count: 3))
         XCTAssertTrue(launched.isEmpty)
-        view.beginPointer(at: view.launcherPoint(0)); view.updateOption(pressed: false)
+        view.beginPointer(at: point(0, count: 3)); view.updateOption(pressed: false)
         view.endPointer(at: RingGeometry.point(angle: .pi / 2, radius: 88))
         XCTAssertTrue(launched.isEmpty)
         view.updateOption(pressed: true)
-        view.beginPointer(at: view.launcherPoint(1)); view.endPointer(at: view.launcherPoint(1))
+        view.beginPointer(at: point(1, count: 3)); view.endPointer(at: point(1, count: 3))
         XCTAssertEqual(launched, ["test.launch.1"])
     }
     @MainActor func testPagingEmptyMissingAppsAndReset() async {
         let view = view(25)
+        view.options.appPageSize = 8
         view.updateOption(pressed: true)
-        XCTAssertEqual(view.visibleLauncherApps.count, 12)
-        view.changeLauncherPage(2)
-        XCTAssertEqual(view.visibleLauncherApps.map(\.app.id), ["test.launch.24"])
-        view.changeLauncherPage(1); XCTAssertEqual(view.launcherPage, 0)
+        XCTAssertEqual(view.visibleRingApps.count, 8)
+        view.changeAppPage(3)
+        XCTAssertEqual(view.visibleRingApps.map(\.id), [.favorite("test.launch.24")])
+        view.changeAppPage(1); XCTAssertEqual(view.appPage, 0)
         view.launcherApps = [LauncherRecord(app: records(1)[0].app, icon: icon, available: false)]
         view.onLaunchApp = { _ in XCTFail("Missing app must not open") }
-        view.activate(at: view.launcherPoint(0))
+        view.activate(at: point(0, count: 1))
         view.reset(apps: [], options: Options())
         XCTAssertFalse(view.showsLauncher); XCTAssertTrue(view.launcherApps.isEmpty)
         view.updateOption(pressed: true)
         XCTAssertTrue(view.showsLauncher)
-        XCTAssertNil(view.launcherTarget(at: RingGeometry.point(angle: 0, radius: 158)))
+        XCTAssertTrue(view.visibleRingApps.isEmpty)
+    }
+
+    @MainActor func testBothGroupsUseSameAppGeometryAndHoverHighlight() async throws {
+        let view = view(1)
+        view.launcherApps = [favorite(for: primary)]
+        let target = point(0, count: 1)
+        view.updateHover(at: target)
+        let runningHighlight = try XCTUnwrap(view.appHighlightPath)
+        let runningSize = view.appIconSize
+        XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
+        view.updateHover(at: target)
+        XCTAssertEqual(view.appIconSize, runningSize)
+        XCTAssertEqual(view.appHighlightPath, runningHighlight)
+        XCTAssertEqual(view.highlightedApp, primary.pid)
+    }
+
+    @MainActor func testRunningFavoriteExpandsTabsAndOpensThroughLauncher() async {
+        let view = view(2)
+        view.launcherApps.insert(favorite(for: primary), at: 1)
+        view.options.excludedBundleIDs = [primary.bundleID]
+        var queries: [pid_t] = [], launches: [String] = [], selections: [String] = []
+        view.onSelectApp = { queries.append($0.pid) }
+        view.onLaunchApp = { launches.append($0.id) }
+        view.onActivateWindow = { selections.append($0.id) }
+        view.enterDefaultLauncherMode()
+        let running = point(1, count: 3)
+        view.updateHover(at: running)
+        XCTAssertEqual(queries, [primary.pid])
+        let tabs = (0..<2).map { index -> WindowRecord in
+            let tab = BrowserTab(bundleID: primary.bundleID, windowID: "1", id: "\(index)",
+                                 title: "Tab \(index)", url: "", windowIndex: 1, index: index + 1, minimized: false)
+            return WindowRecord(id: tab.id, pid: primary.pid, title: tab.title, minimized: false, fullscreen: false,
+                                frame: .zero, element: AXUIElementCreateApplication(primary.pid), tab: tab)
+        }
+        view.setWindows(.ready(tabs), for: primary.pid)
+        XCTAssertTrue(view.showsWindowArc)
+        XCTAssertEqual(view.arcAnchor, RingGeometry.angle(index: 1, count: 3))
+        view.navigate(.toggleSecondary); view.navigate(.activate)
+        XCTAssertEqual(selections, [tabs[0].id])
+        view.beginPointer(at: running); view.endPointer(at: running)
+        XCTAssertEqual(launches, [primary.bundleID])
+        view.updateHover(at: point(2, count: 3))
+        XCTAssertFalse(view.showsWindowArc)
+        XCTAssertNotNil(view.appHighlightPath)
+        view.selectingWithShortcut = true
+        view.activateHovered()
+        XCTAssertEqual(launches, [primary.bundleID, "test.launch.1"])
+        view.endLauncherMode()
+        XCTAssertTrue(view.visibleRingApps.isEmpty, "The filter still applies to the running group")
+    }
+
+    private func favorite(for app: AppRecord) -> LauncherRecord {
+        LauncherRecord(app: LauncherApp(bundleID: app.bundleID, name: app.name, path: "/fixture.app"), icon: icon, available: true)
     }
     @MainActor func testActionPanelLauncherKeepsFocusAndRestoresActionPage() async throws {
         let launcher = view()
@@ -149,6 +201,33 @@ final class LauncherTests: XCTestCase {
         XCTAssertEqual(launcher.bounds.size, CGSize(width: 480, height: 480))
     }
 
+    @MainActor func testCenterSwitchFromActionLauncherRestoresActionPage() async {
+        let launcher = view()
+        let ordinary = RingPanel(contentRect: CGRect(x: -10000, y: -10000, width: 520, height: 520), styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        ordinary.contentView = launcher
+        let actions = ActionRingView(frame: CGRect(x: 0, y: 0, width: 480, height: 480))
+        actions.actions = (0..<8).map { AppAction(id: "action.\($0)", name: "Action \($0)", shortcut: Shortcut()) }
+        actions.turnPage(1)
+        let panel = ActionPanel(contentRect: ordinary.frame, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
+        panel.contentView = actions
+        defer { panel.orderOut(nil); ordinary.orderOut(nil) }
+
+        launcher.onLauncherModeEnded = {
+            panel.setLauncherVisible(false, launcher: launcher, actions: actions, restoreTo: ordinary)
+        }
+        launcher.updateOption(pressed: true)
+        panel.setLauncherVisible(true, launcher: launcher, actions: actions, restoreTo: ordinary)
+        XCTAssertTrue(panel.contentView === launcher)
+
+        launcher.beginPointer(at: RingGeometry.center, clickCount: 2)
+        launcher.endPointer(at: RingGeometry.center)
+        XCTAssertFalse(launcher.showsLauncher)
+        XCTAssertTrue(panel.contentView === actions)
+        XCTAssertTrue(ordinary.contentView === launcher)
+        XCTAssertNil(launcher.launcherInnerArtwork)
+        XCTAssertEqual(actions.page, 1)
+    }
+
     @MainActor func testKeyboardLauncherEntryIsNotAPointerClick() async {
         let launcher = view()
         var pointerInteractions = 0, entries = 0
@@ -179,7 +258,7 @@ final class LauncherTests: XCTestCase {
         guard let directory = ProcessInfo.processInfo.environment["LUMARING_SNAPSHOT_DIR"] else { return }
         _ = NSApplication.shared
         try FileManager.default.createDirectory(atPath: directory, withIntermediateDirectories: true)
-        let view = view(14)
+        let view = view(6)
         let samples = ["/System/Applications/Notes.app", "/System/Applications/Preview.app",
                        "/System/Applications/Utilities/Terminal.app", "/System/Library/CoreServices/Finder.app"]
         view.launcherApps = view.launcherApps.enumerated().map { index, record in
@@ -187,21 +266,22 @@ final class LauncherTests: XCTestCase {
             let app = LauncherApp(bundleID: record.app.bundleID, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, path: path)
             return LauncherRecord(app: app, icon: NSWorkspace.shared.icon(forFile: path), available: true)
         }
-        view.apps = (0..<6).map { index in
-            let path = samples[index % samples.count]
-            return AppRecord(pid: pid_t(100 + index), bundleID: "test.primary.\(index)", name: "Primary", icon: NSWorkspace.shared.icon(forFile: path))
+        view.apps = view.launcherApps.enumerated().map { index, record in
+            AppRecord(pid: pid_t(100 + index), bundleID: record.app.bundleID, name: record.app.name, icon: record.icon)
         }
         let panel = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         panel.contentView = view
-        view.updateOption(pressed: true)
-        for theme in [NSAppearance.Name.aqua, .darkAqua] {
-            view.appearance = NSAppearance(named: theme)
-            view.updateHover(at: view.launcherPoint(1))
-            view.refresh(); view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
-            let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
-            view.cacheDisplay(in: view.bounds, to: bitmap)
-            let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
-            try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("launcher-\(theme.rawValue).png"))
+        for group in ["favorites", "running"] {
+            if group == "favorites" { view.enterDefaultLauncherMode() } else { view.endLauncherMode() }
+            for theme in [NSAppearance.Name.aqua, .darkAqua] {
+                view.appearance = NSAppearance(named: theme)
+                view.updateHover(at: point(1, count: view.visibleRingApps.count))
+                view.refresh(); view.layoutSubtreeIfNeeded(); view.displayIfNeeded()
+                let bitmap = try XCTUnwrap(view.bitmapImageRepForCachingDisplay(in: view.bounds))
+                view.cacheDisplay(in: view.bounds, to: bitmap)
+                let data = try XCTUnwrap(bitmap.representation(using: .png, properties: [:]))
+                try data.write(to: URL(fileURLWithPath: directory).appendingPathComponent("\(group)-\(theme.rawValue).png"))
+            }
         }
         panel.contentView = nil
     }

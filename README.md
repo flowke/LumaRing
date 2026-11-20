@@ -27,3 +27,7 @@ Requires **macOS 14 or later**. Supports Apple Silicon and Intel.
    ```
 
 2. **[GitHub Releases](https://github.com/potatoQi/LumaRing/releases)**
+
+## Using the ring
+
+The normal ring opens with **Settings → Apps → Favorites**, in the order you set. Favorites and running apps use the same ring and hover effects. Point at a running favorite to see its windows or supported browser tabs, or click a stopped favorite to open it. Double-click the center to switch groups. While viewing running apps, hold Option when no window or tab arc is open to see favorites temporarily, then release it to return. Both groups support Tab / Shift-Tab, Return, and scroll paging.

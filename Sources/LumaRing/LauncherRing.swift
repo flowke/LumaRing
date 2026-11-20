@@ -10,7 +10,7 @@ extension RingView {
         RingGeometry.point(angle: RingGeometry.angle(index: index, count: visibleLauncherApps.count), radius: RingGeometry.windowRadius)
     }
     func launcherTarget(at point: CGPoint) -> LauncherRecord? {
-        guard showsLauncher, let index = RingGeometry.index(at: point, count: visibleLauncherApps.count,
+        guard showsActionLauncher, let index = RingGeometry.index(at: point, count: visibleLauncherApps.count,
             inner: RingGeometry.windowInner, outer: RingGeometry.windowOuter) else { return nil }
         return visibleLauncherApps[index]
     }
@@ -22,21 +22,30 @@ extension RingView {
         guard !showsLauncher else { return }
         enterLauncherMode(pinned: false)
     }
-    private func enterLauncherMode(pinned: Bool) {
+    func enterLauncherMode(pinned: Bool) {
         centerClickWork?.cancel(); centerClickWork = nil
         // A keyboard hold is not a pointer interaction: keep the double-tap
         // recognizer independent of keyboard-driven launcher presentation.
         if pinned { onPointerInteraction?() }
-        onLauncherModeEntered?()
         clearSelection()
+        runningAppPage = appPage
+        appPage = 0
         launcherPinned = pinned
         showsLauncher = true; launcherPage = 0; hoveredLauncher = nil
+        onLauncherModeEntered?()
         refresh()
+    }
+
+    /// The ordinary ring opens on the configured favorites group. Keep this
+    /// pinned so the invocation shortcut's Option release does not dismiss it.
+    func enterDefaultLauncherMode() {
+        guard !isEditingName, !isContextMenuOpen, !isPointerDown else { return }
+        enterLauncherMode(pinned: true)
     }
     @discardableResult func toggleLauncherFromCenter(at point: CGPoint) -> Bool {
         guard !isEditingName, !isContextMenuOpen, !isPointerDown, !showsWindowArc,
               hypot(point.x - RingGeometry.center.x, point.y - RingGeometry.center.y) < RingGeometry.appInner,
-              !CGRect(x: 218, y: 208, width: 44, height: 14).contains(point) else { return false }
+              !pageControlsRect.contains(point) else { return false }
         centerClickWork?.cancel(); centerClickWork = nil
         if showsLauncher { onPointerInteraction?(); endLauncherMode() }
         else { enterLauncherMode(pinned: true) }
@@ -46,7 +55,7 @@ extension RingView {
         // Leave the first click available for a double-click before opening settings.
         centerClickWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
-            guard let self, self.window?.isVisible == true, !self.showsLauncher,
+            guard let self, self.window?.isVisible == true, !self.showsActionLauncher,
                   !self.isEditingName, !self.isContextMenuOpen, !self.isPointerDown else { return }
             self.centerClickWork = nil
             self.onSettings?()
@@ -58,8 +67,11 @@ extension RingView {
         cancelPointerInteraction()
         launcherPinned = false
         showsLauncher = false; hoveredLauncher = nil
+        appPage = runningAppPage
+        clampAppPage()
         clearSelection()
         refresh()
+        onLauncherModeEnded?()
     }
     func changeLauncherPage(_ direction: Int) {
         guard showsLauncher, !isPointerDown else { return }
@@ -77,7 +89,7 @@ extension RingView {
         }
     }
     func changeContentMode(_ mode: AppContentMode, for app: AppRecord) {
-        guard BrowserAdapters.supports(app.bundleID), !showsLauncher else { return }
+        guard BrowserAdapters.supports(app.bundleID), !showsActionLauncher else { return }
         options.appContentModes[app.bundleID] = mode
         clearSelection()
         select(app)
@@ -97,7 +109,7 @@ extension RingView {
         }
         let title = visibleLauncherApps.first { $0.app.id == hoveredLauncher }?.app.name ?? L10n.text("常用应用", "Favorites")
         if launcherInnerArtwork == nil { RingCenterLabel.draw(title: title,
-            detail: launcherApps.isEmpty ? L10n.text("在设置中添加应用", "Add apps in Settings") : (launcherPinned ? L10n.text("双击中心返回", "Double-click") : L10n.text("松开 ⌥ 返回", "Release ⌥")),
+            detail: launcherApps.isEmpty ? L10n.text("在设置中添加应用", "Add apps in Settings") : (launcherPinned ? L10n.text("双击中心显示运行中应用", "Double-click for running apps") : L10n.text("松开 ⌥ 返回", "Release ⌥")),
             paging: launcherPages > 1) }
         if launcherPages > 1 { RingCenterLabel.page("‹  \(launcherPage + 1)/\(launcherPages)  ›", in: NSRect(x: 215, y: 207, width: 50, height: 15)) }
         for (index, record) in visibleLauncherApps.enumerated() {

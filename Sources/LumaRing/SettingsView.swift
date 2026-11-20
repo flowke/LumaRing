@@ -71,7 +71,9 @@ struct SettingsView: View {
                         switch selectedSection {
                         case .general: general
                         case .appearance: appearance
-                        case .apps: appFilter; launcherSettings
+                        case .apps:
+                            launcherSettings
+                            appFilter
                         case .actions:
                             card(L10n.text("应用内的常用操作", "Shortcuts for each app")) {
                                 ActionSettingsView(profiles: $preferences.options.actionProfiles,
@@ -334,8 +336,8 @@ struct SettingsView: View {
 
     private var launcherSettings: some View {
         card(L10n.text("常用应用", "Favorites")) {
-            hint(L10n.text("在轮盘中按住 Option 显示，未运行的应用也能打开。", "Hold Option in the ring to show favorites, including apps that aren’t running."))
-                .help(L10n.text("全局轮盘未展开二级轮盘时可用；也可双击中心展开或收起。", "Available when the app ring has no secondary arc open. You can also double-click its center to toggle favorites."))
+            hint(L10n.text("轮盘默认显示这里的应用。悬停已运行的应用可查看窗口或标签页，点击可打开尚未运行的应用。双击轮盘中心可切换到运行中的应用。", "The ring opens with these apps. Point at a running favorite to see its windows or tabs, or click a stopped app to open it. Double-click the center to switch to running apps."))
+                .help(L10n.text("常用应用和运行中应用是两组独立入口，顺序保持此处配置顺序。", "Favorites and running apps are separate groups, and favorites keep this order."))
             ForEach(preferences.options.launcherApps) { app in
                 HStack {
                     Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 24, height: 24)
@@ -362,14 +364,14 @@ struct SettingsView: View {
     }
 
     private var appFilter: some View {
-        card(L10n.text("轮盘中的应用", "Apps in the ring")) {
+        card(L10n.text("运行中的应用", "Running apps")) {
             Picker(L10n.text("排列顺序", "Sort by"), selection: $preferences.options.sortByName) {
                 Text(L10n.text("应用名称", "Name")).tag(true)
                 Text(L10n.text("最近使用", "Recent use")).tag(false)
             }
             Toggle(L10n.text("包含最小化窗口", "Include minimized windows"), isOn: $preferences.options.includeMinimized)
             Divider()
-            hint(L10n.text("取消勾选即可隐藏应用。", "Uncheck an app to hide it."))
+            hint(L10n.text("取消勾选会从运行中的应用列表隐藏该应用。", "Uncheck an app to hide it from the running apps list."))
             ForEach(apps.filter { $0.bundleIdentifier != nil }, id: \.processIdentifier) { app in
                 let identifier = app.bundleIdentifier ?? ""
                 VStack(alignment: .leading, spacing: 7) {
@@ -437,9 +439,9 @@ struct SettingsView: View {
                 DisclosureGroup(L10n.text("手势与常用应用", "Gestures and favorites")) {
                     VStack(spacing: 12) {
                         guideRow(L10n.text("轻点后抬手", "Tap and lift"), L10n.text("打开 / 关闭轮盘", "Open / dismiss the ring"))
-                        guideRow(L10n.text("按住 Option", "Hold Option"), L10n.text("显示常用应用", "Show favorites"))
-                        guideRow(L10n.text("双击中心", "Double-click the center"), L10n.text("展开 / 收起常用应用", "Toggle favorites"))
-                        hint(L10n.text("常用应用在无二级轮盘时显示。", "Favorites appear when no secondary arc is open."))
+                        guideRow(L10n.text("按住 Option", "Hold Option"), L10n.text("临时显示常用应用", "Temporarily show favorites"))
+                        guideRow(L10n.text("双击中心", "Double-click the center"), L10n.text("切换常用应用 / 运行中应用", "Switch favorites / running apps"))
+                        hint(L10n.text("轮盘默认显示常用应用；运行中应用视图未展开窗口或标签圆弧时，按住 Option 显示常用应用，松开后返回。", "Favorites are the default view; in the running-app view, hold Option to show them when no window or tab arc is open, then release to return."))
                         guideRow(L10n.text("双击左 Option", "Double-tap left Option"), L10n.text("应用 / 快捷操作", "Apps / app actions"))
                         guideRow(L10n.text("三指向内捏合后抬手", "Pinch inward, then lift"), L10n.text("最小化窗口", "Minimize the window"))
                         guideRow(L10n.text("滚动", "Scroll"), L10n.text("翻页", "Change pages"))

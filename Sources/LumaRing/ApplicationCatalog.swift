@@ -39,11 +39,13 @@ final class ApplicationCatalog {
         if let app = NSWorkspace.shared.frontmostApplication { recent = [app.processIdentifier] }
     }
 
-    func snapshot(options: Options) -> [AppRecord] {
+    func snapshot(options: Options, includeExcludedFavorites: Bool = false) -> [AppRecord] {
         let excluded = Set(options.excludedBundleIDs)
+        let favorites = includeExcludedFavorites ? Set(options.launcherApps.map(\.bundleID)) : []
         let apps = NSWorkspace.shared.runningApplications.filter {
-            $0.activationPolicy == .regular && !$0.isTerminated && $0.processIdentifier != getpid()
-                && !excluded.contains($0.bundleIdentifier ?? "")
+            let id = $0.bundleIdentifier ?? ""
+            return $0.activationPolicy == .regular && !$0.isTerminated && $0.processIdentifier != getpid()
+                && (!excluded.contains(id) || favorites.contains(id))
         }
         let live = Set(apps.map(\.processIdentifier))
         records = records.filter { live.contains($0.key) }

@@ -45,17 +45,54 @@ final class CenterLauncherTests: XCTestCase {
         view.endPointer(at: RingGeometry.center)
         XCTAssertFalse(view.showsLauncher); XCTAssertFalse(view.launcherPinned)
     }
-    @MainActor func testMouseOpenedLauncherUsesExistingLaunchAndDisabledPrimaryActions() async {
+    @MainActor func testMouseOpenedFavoritesUsePrimaryRingTargets() async {
         let view = makeView()
         var launched: String?
         view.onActivateApp = { _ in XCTFail("Primary apps remain disabled") }
         view.onQuitApp = { _ in XCTFail("Primary apps remain disabled") }
         view.onLaunchApp = { launched = $0.bundleID }
         XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
-        let primary = RingGeometry.point(angle: .pi / 2, radius: 88)
-        view.beginPointer(at: primary); view.endPointer(at: primary)
         let outer = view.launcherPoint(0)
         view.beginPointer(at: outer); view.endPointer(at: outer)
+        XCTAssertNil(launched)
+        let primary = RingGeometry.point(angle: .pi / 2, radius: RingGeometry.appRadius)
+        view.beginPointer(at: primary); view.endPointer(at: primary)
+        XCTAssertEqual(launched, "test.quick")
+    }
+
+    @MainActor func testDefaultGroupIsFavoritesAndCenterTogglesRunningApps() async {
+        let view = makeView()
+        view.launcherApps = [
+            view.launcherApps[0],
+            LauncherRecord(app: LauncherApp(bundleID: "test.second", name: "Second", path: "/missing-second.app"), icon: view.launcherApps[0].icon, available: true)
+        ]
+        view.optionPressed = true
+        view.enterDefaultLauncherMode()
+        XCTAssertTrue(view.showsLauncher)
+        XCTAssertTrue(view.launcherPinned)
+        XCTAssertEqual(view.visibleRingApps.map(\.id), [.favorite("test.quick"), .favorite("test.second")])
+        view.updateOption(pressed: false)
+        XCTAssertTrue(view.showsLauncher, "The invocation's Option release must not dismiss pinned favorites")
+        XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
+        XCTAssertFalse(view.showsLauncher)
+        XCTAssertEqual(view.visibleApps.map(\.bundleID), ["test.primary"])
+        view.updateOption(pressed: true)
+        XCTAssertTrue(view.showsLauncher)
+        XCTAssertFalse(view.launcherPinned)
+        view.updateOption(pressed: false)
+        XCTAssertFalse(view.showsLauncher, "A temporary favorites view returns to running apps on Option release")
+        XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
+        XCTAssertTrue(view.showsLauncher)
+        XCTAssertTrue(view.launcherPinned)
+    }
+
+    @MainActor func testKeyboardSelectionUsesLauncherCallback() async {
+        let view = makeView()
+        var launched: String?
+        view.onLaunchApp = { launched = $0.bundleID }
+        view.enterDefaultLauncherMode()
+        view.navigate(.step(1))
+        view.navigate(.activate)
         XCTAssertEqual(launched, "test.quick")
     }
     @MainActor func testSecondaryArcEditingMenuDragAndPagingExcludeDoubleClick() async {

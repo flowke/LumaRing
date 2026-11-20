@@ -114,7 +114,14 @@ final class RingPanel: NSPanel {
             self.openedByShortcut = false
             self.gate.invalidate()
             self.windows.cancelAndClear(); self.tabs.cancelAndClear()
+            self.counts.cancelAndClear()
             self.previews.cancelAndClear(); self.previewCard.dismiss()
+            self.refreshCounts()
+        }
+        view.onLauncherModeEnded = { [weak self] in
+            guard let self else { return }
+            if self.actionMode { self.setActionLauncherSurface(false) }
+            else if !self.switchingMode { self.refreshCounts() }
         }
         view.makeAppMenu = { [weak self] app in
             guard let self else { return NSMenu() }
@@ -275,7 +282,7 @@ final class RingPanel: NSPanel {
     }
 
     private func refreshCounts() {
-        guard isVisible, !actionMode else { return }
+        guard isVisible, !actionMode, !switchingMode else { return }
         counts.refresh(apps: view.visibleApps, options: view.options) { [weak self] pid, count in
             guard let self, self.isVisible else { return }
             self.view.setItemCount(count, for: pid)
@@ -334,9 +341,10 @@ final class RingPanel: NSPanel {
         panel.setFrame(frame, display: false)
         view.frame = NSRect(origin: .zero, size: frame.size)
         view.bounds = NSRect(x: 0, y: 0, width: RingGeometry.canvas, height: RingGeometry.canvas)
-        view.reset(apps: catalog.snapshot(options: options), options: options)
+        view.reset(apps: catalog.snapshot(options: options, includeExcludedFavorites: true), options: options)
         if fromTrackpad { view.suppressInvocationClicks(at: ProcessInfo.processInfo.systemUptime) }
         view.launcherApps = launcherCatalog.snapshot(options.launcherApps)
+        if !actionMode { view.enterDefaultLauncherMode() }
         // The Option already held by the invocation shortcut must be released first.
         view.optionPressed = NSEvent.modifierFlags.contains(.option)
         panel.alphaValue = 1
@@ -507,8 +515,9 @@ final class RingPanel: NSPanel {
         } else {
             actionPanel?.orderOut(nil)
             let options = Preferences.shared.options
-            view.reset(apps: catalog.snapshot(options: options), options: options)
+            view.reset(apps: catalog.snapshot(options: options, includeExcludedFavorites: true), options: options)
             view.launcherApps = launcherCatalog.snapshot(options.launcherApps)
+            view.enterDefaultLauncherMode()
             panel?.makeKeyAndOrderFront(nil); panel?.makeFirstResponder(view)
             view.refresh(); refreshCounts()
         }
@@ -590,17 +599,25 @@ final class RingPanel: NSPanel {
             if originApp?.isTerminated != false || NSWorkspace.shared.frontmostApplication?.processIdentifier != originApp?.processIdentifier { dismiss() }
             return
         }
-        // Keep spatial order stable while selecting. Drop terminated apps only.
+        // Keep the running group in place while selecting. Reconcile favorite
+        // processes separately so a favorite can gain or lose its secondary arc.
         guard isVisible else { return }
         let live = Set(NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }.map(\.processIdentifier))
-        guard view.apps.contains(where: { !live.contains($0.pid) }) else { return }
-        view.apps.removeAll { !live.contains($0.pid) }
+        let retained = view.apps.filter { live.contains($0.pid) }
+        let existing = Set(retained.map(\.pid))
+        let favorites = Set(view.launcherApps.map(\.app.bundleID))
+        let started = favorites.isEmpty ? [] : catalog.snapshot(options: view.options, includeExcludedFavorites: true)
+            .filter { favorites.contains($0.bundleID) && !existing.contains($0.pid) }
+        guard retained.count != view.apps.count || !started.isEmpty else { return }
+        view.apps = retained
+        view.additionalFavoriteProcesses.formUnion(started.map(\.pid))
+        view.apps += started
         if let selected = view.selectedApp, !live.contains(selected) {
-            gate.invalidate(); windows.cancelAndClear()
+            gate.invalidate(); windows.cancelAndClear(); tabs.cancelAndClear()
             view.clearSelection()
             view.message = L10n.text("应用已退出 · 请选择其他应用", "App closed · Choose another app")
         }
-        view.appPage = min(view.appPage, RingGeometry.pageCount(total: view.apps.count, size: view.appPageSize) - 1)
+        view.clampAppPage()
         view.refresh()
         refreshCounts()
     }
