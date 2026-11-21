@@ -48,6 +48,19 @@ swift package --disable-keychain --disable-netrc resolve
 
 私钥应妥善备份；若迁移电脑，可使用 Sparkle 官方导出、导入工具。私钥不能放入仓库、日志、普通配置文件或 Release 附件。
 
+## 本机开发测试
+
+测试辅助功能、录屏和快捷键时，使用固定签名的 `LumaRing Dev.app`。Xcode 直接运行的裸二进制使用临时签名，重新链接后可能无法沿用旧授权。先从 `security find-identity -v -p codesigning` 选择本机可用的固定开发签名指纹，写入仓库的本地 Git 配置（不提交）：
+
+```bash
+git config --local lumaring.developmentSigningIdentity <证书指纹>
+bash scripts/build.sh --development
+```
+
+之后修改代码，只需再运行第二条命令。它构建并启动 `dist/dev/LumaRing Dev.app`，已有测试版运行时会先退出再替换。首次启动请在系统设置授权 **LumaRing Dev**；它有独立的应用标识和偏好设置，不检查正式版更新。若安装版或 Xcode 裸二进制正在运行，先退出它，以免争用全局快捷键。
+
+测试版不生成发布文件，不修改 `VERSION`，也不使用发布证书。开发完成后，仍用现有正式打包命令。
+
 ## 本地生成发布文件
 
 构建需要 Xcode 26 或更新版本提供的 macOS SDK，以编译液态玻璃接口；应用最低系统要求仍为 macOS 14，旧系统运行时使用磨砂材质。

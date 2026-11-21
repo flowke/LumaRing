@@ -77,7 +77,7 @@ struct LauncherRecord {
         config.promptsUserIfNeeded = false
         open(url, config) { running, error in
             DispatchQueue.main.async {
-                completion(error == nil && running?.bundleIdentifier == app.bundleID && running?.isTerminated == false)
+                completion(error == nil && running != nil)
             }
         }
     }

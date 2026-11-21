@@ -96,6 +96,9 @@ struct SettingsView: View {
             browserTabs.refreshLanguage()
             refresh()
         }
+        .onChange(of: preferences.options.appContentModes) { _, _ in
+            browserTabs.refreshAuthorization(apps)
+        }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in refresh() }
     }
 
@@ -339,11 +342,17 @@ struct SettingsView: View {
             hint(L10n.text("轮盘默认显示这里的应用。悬停已运行的应用可查看窗口或标签页，点击可打开尚未运行的应用。双击轮盘中心可切换到运行中的应用。", "The ring opens with these apps. Point at a running favorite to see its windows or tabs, or click a stopped app to open it. Double-click the center to switch to running apps."))
                 .help(L10n.text("常用应用和运行中应用是两组独立入口，顺序保持此处配置顺序。", "Favorites and running apps are separate groups, and favorites keep this order."))
             ForEach(preferences.options.launcherApps) { app in
-                HStack {
-                    Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 24, height: 24)
-                    Text(app.name)
-                    Spacer()
-                    Button(L10n.text("移除", "Remove")) { preferences.options.launcherApps.removeAll { $0.id == app.id } }
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 24, height: 24)
+                        Text(app.name)
+                        Spacer()
+                        browserModePicker(for: app.bundleID, name: app.name)
+                        Button(L10n.text("移除", "Remove")) { preferences.options.launcherApps.removeAll { $0.id == app.id } }
+                    }
+                    if preferences.options.contentMode(for: app.bundleID) == .tabs {
+                        browserConnectionStatus(for: app.bundleID, runningApp: apps.first { $0.bundleIdentifier == app.bundleID && !$0.isTerminated })
+                    }
                 }
             }
             Button(L10n.text("添加应用…", "Add apps…")) {
@@ -386,28 +395,10 @@ struct SettingsView: View {
                             }
                         }
                         Spacer(minLength: 12)
-                        if BrowserAdapters.supports(identifier) {
-                            Picker(L10n.text("\(app.localizedName ?? identifier) 的切换内容", "Content for \(app.localizedName ?? identifier)"), selection: Binding(
-                                get: { preferences.options.contentMode(for: identifier) },
-                                set: { preferences.options.appContentModes[identifier] = $0; browserTabs.refreshAuthorization(apps) }
-                            )) {
-                                Text(L10n.text("窗口", "Windows")).tag(AppContentMode.windows)
-                                Text(L10n.text("标签页", "Tabs")).tag(AppContentMode.tabs)
-                            }.labelsHidden().pickerStyle(.segmented).frame(width: 140)
-                        }
+                        browserModePicker(for: identifier, name: app.localizedName ?? identifier)
                     }
                     if preferences.options.contentMode(for: identifier) == .tabs {
-                        HStack(alignment: .top) {
-                            if browserTabs.connected.contains(identifier) {
-                                Label(L10n.text("已连接", "Connected"), systemImage: "checkmark.circle.fill")
-                                    .font(.caption).foregroundStyle(.green)
-                            } else {
-                                warning(browserTabs.messages[identifier] ?? L10n.text("连接浏览器以切换标签页。", "Connect to switch tabs."))
-                                Spacer()
-                                Button(browserTabs.connecting.contains(identifier) ? L10n.text("连接中…", "Connecting…") : L10n.text("连接", "Connect")) { browserTabs.connect(app) }
-                                    .disabled(browserTabs.connecting.contains(identifier))
-                            }
-                        }.padding(.leading, 22)
+                        browserConnectionStatus(for: identifier, runningApp: app)
                     }
                 }
             }
@@ -417,6 +408,36 @@ struct SettingsView: View {
                 Button(L10n.text("显示全部", "Show all")) { preferences.options.excludedBundleIDs = [] }
             }
         }
+    }
+
+    @ViewBuilder private func browserModePicker(for bundleID: String, name: String) -> some View {
+        if BrowserAdapters.supports(bundleID) {
+            Picker(L10n.text("\(name) 的切换内容", "Content for \(name)"), selection: Binding(
+                get: { preferences.options.contentMode(for: bundleID) },
+                set: { preferences.options.appContentModes[bundleID] = $0 }
+            )) {
+                Text(AppContentMode.windows.title).tag(AppContentMode.windows)
+                Text(AppContentMode.tabs.title).tag(AppContentMode.tabs)
+            }.labelsHidden().pickerStyle(.segmented).frame(width: 140)
+        }
+    }
+
+    private func browserConnectionStatus(for bundleID: String, runningApp: NSRunningApplication?) -> some View {
+        HStack(alignment: .top) {
+            if let runningApp, !runningApp.isTerminated {
+                if browserTabs.connected.contains(bundleID) {
+                    Label(L10n.text("已连接", "Connected"), systemImage: "checkmark.circle.fill")
+                        .font(.caption).foregroundStyle(.green)
+                } else {
+                    warning(browserTabs.messages[bundleID] ?? L10n.text("连接浏览器以切换标签页。", "Connect to switch tabs."))
+                    Spacer()
+                    Button(browserTabs.connecting.contains(bundleID) ? L10n.text("连接中…", "Connecting…") : L10n.text("连接", "Connect")) { browserTabs.connect(runningApp) }
+                        .disabled(browserTabs.connecting.contains(bundleID))
+                }
+            } else {
+                hint(L10n.text("打开浏览器后即可连接。", "Open the browser to connect."))
+            }
+        }.padding(.leading, 22)
     }
 
     private var guide: some View {

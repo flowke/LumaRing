@@ -27,13 +27,19 @@ def update_configuration(root=ROOT):
     return config
 
 
-def configure(destination, root=ROOT):
+def configure(destination, root=ROOT, *, development=False):
     version = read_version(root)
-    config = update_configuration(root)
     info = plistlib.loads((root / 'Resources/Info.plist').read_bytes())
-    info.update(CFBundleShortVersionString=version, CFBundleVersion=version,
-                SUFeedURL=f"https://github.com/{config['repository']}/releases/latest/download/appcast.xml",
-                SUPublicEDKey=config['publicEDKey'])
+    info.update(CFBundleShortVersionString=version, CFBundleVersion=version)
+    if development:
+        info.update(CFBundleIdentifier=f"{info['CFBundleIdentifier']}.dev", CFBundleName='LumaRing Dev',
+                    CFBundleDisplayName='LumaRing Dev', SUEnableAutomaticChecks=False)
+        info.pop('SUFeedURL', None)
+        info.pop('SUPublicEDKey', None)
+    else:
+        config = update_configuration(root)
+        info.update(SUFeedURL=f"https://github.com/{config['repository']}/releases/latest/download/appcast.xml",
+                    SUPublicEDKey=config['publicEDKey'])
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_bytes(plistlib.dumps(info, sort_keys=False))
     return info
@@ -44,11 +50,12 @@ if __name__ == '__main__':
     parser.add_argument('--print-version', action='store_true')
     parser.add_argument('--verify-tag')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--development', action='store_true')
     args = parser.parse_args()
     version = read_version()
     if args.verify_tag and args.verify_tag != f'v{version}':
         parser.error(f'Tag must exactly match VERSION: v{version}')
     if args.output:
-        configure(args.output)
+        configure(args.output, development=args.development)
     if args.print_version:
         print(version)

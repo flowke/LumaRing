@@ -113,5 +113,16 @@ class ReleaseTests(unittest.TestCase):
         self.assertTrue(info['SURequireSignedFeed'])
         self.assertTrue(info['SUVerifyUpdateBeforeExtraction'])
 
+    def test_development_bundle_has_separate_identity_and_no_update_feed(self):
+        (self.root / 'Resources/UpdateConfig.json').unlink()
+        info = configure(self.root / 'development.plist', self.root, development=True)
+        self.assertEqual(info['CFBundleIdentifier'], 'local.lumaring.app.dev')
+        self.assertEqual(info['CFBundleDisplayName'], 'LumaRing Dev')
+        self.assertEqual(info['CFBundleShortVersionString'], '0.1.0')
+        self.assertEqual(info['CFBundleVersion'], '0.1.0')
+        self.assertFalse(info['SUEnableAutomaticChecks'])
+        self.assertNotIn('SUFeedURL', info)
+        self.assertNotIn('SUPublicEDKey', info)
+
 
 if __name__ == '__main__': unittest.main()

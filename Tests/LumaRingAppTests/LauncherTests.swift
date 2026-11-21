@@ -4,6 +4,11 @@ import LumaRingCore
 @testable import LumaRing
 
 final class LauncherTests: XCTestCase {
+    private final class ExitedApplication: NSRunningApplication, @unchecked Sendable {
+        override var isTerminated: Bool { true }
+        override var bundleIdentifier: String? { nil }
+    }
+
     private let icon = NSImage(systemSymbolName: "app.fill", accessibilityDescription: nil)!
     private var primary: AppRecord { AppRecord(pid: 100, bundleID: "test.primary", name: "Primary", icon: icon) }
     private func records(_ count: Int = 3) -> [LauncherRecord] {
@@ -254,6 +259,20 @@ final class LauncherTests: XCTestCase {
         launcher.launch(app) { XCTAssertFalse($0); failed.fulfill() }
         await fulfillment(of: [failed], timeout: 1)
     }
+
+    @MainActor func testLaunchSucceedsWhenWorkspaceReturnsAnExitedApplication() async {
+        let app = LauncherApp(bundleID: "com.apple.apps.launcher", name: "Apps", path: "/System/Applications/Apps.app")
+        let launched = expectation(description: "successful launch")
+        let launcher = ApplicationLauncher(resolve: { _ in URL(fileURLWithPath: app.path) }, open: { _, _, reply in
+            reply(ExitedApplication(), nil)
+        })
+        launcher.launch(app) { success in
+            XCTAssertTrue(success)
+            launched.fulfill()
+        }
+        await fulfillment(of: [launched], timeout: 1)
+    }
+
     @MainActor func testRenderLauncherInBothThemes() async throws {
         guard let directory = ProcessInfo.processInfo.environment["LUMARING_SNAPSHOT_DIR"] else { return }
         _ = NSApplication.shared
