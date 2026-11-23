@@ -1014,35 +1014,26 @@ enum RingApp {
         let menus = visibleLauncherMenus
         guard !menus.isEmpty else { return }
         let spacing = appSpacing(count: visibleRingApps.count)
-        let paragraph = NSMutableParagraphStyle()
-        paragraph.alignment = .center
-        paragraph.lineBreakMode = .byTruncatingTail
         for menu in menus {
             for (index, record) in menu.children.enumerated() {
                 let point = menu.layout.point(index)
                 let highlighted = menu.key(record) == hoveredLauncherChild
-                let icon = launcherChildIconRect(at: point, layout: menu.layout, index: index)
+                let tile = launcherChildTileLayout(menu.layout, index: index, mainSpacing: spacing)
                 if highlighted {
                     accent.withAlphaComponent(dark ? 0.35 : 0.20).setFill()
-                    NSBezierPath(roundedRect: icon.insetBy(dx: -5, dy: -4), xRadius: 9, yRadius: 9).fill()
+                    NSBezierPath(roundedRect: tile.iconRect(at: point).insetBy(dx: -5, dy: -4), xRadius: 9, yRadius: 9).fill()
                 }
-                let width = menu.layout.style == .arc ? 54.0 : (index == 0 ? min(42, spacing * 0.78) : min(42, menu.layout.stripHalfWidth * 1.6))
-                if width < 24 { continue }
-                (record.name as NSString).draw(in: NSRect(x: point.x - width / 2, y: icon.minY - 15, width: width, height: 13), withAttributes: [
-                    .font: NSFont.systemFont(ofSize: 10, weight: highlighted ? .semibold : .regular),
-                    .foregroundColor: record.available ? ink : muted, .paragraphStyle: paragraph
-                ])
+                drawLauncherName(record.name, available: record.available, highlighted: highlighted, tile: tile, at: point)
             }
         }
     }
 
-    private func launcherChildIconRect(at point: CGPoint, layout: LauncherSecondaryLayout, index: Int) -> CGRect {
-        let size = layout.replacesEntry ? (index == 0 ? min(28, appIconSize) : min(28, layout.stripHalfWidth * 1.45)) : 28
-        let inset = size < 22 ? size / 2 : size / 2 - 5
-        return CGRect(x: point.x - size / 2, y: point.y - inset, width: size, height: size)
+    private func launcherChildTileLayout(_ layout: LauncherSecondaryLayout, index: Int, mainSpacing: CGFloat) -> LauncherTileLayout {
+        LauncherTileLayout(spacing: layout.tileSpacing(at: index, mainSpacing: mainSpacing), maxIconSize: 28,
+                           showsName: options.launcherShowsItemNames)
     }
 
-    private func updateLauncherChildTiles(_ menus: [LauncherMenuLayout]) {
+    private func updateLauncherChildTiles(_ menus: [LauncherMenuLayout], mainSpacing: CGFloat) {
         let childIDs = Set(menus.flatMap { menu in menu.children.map { menu.key($0) } })
         for id in launcherChildTiles.keys.filter({ !childIDs.contains($0) }) {
             launcherChildTiles.removeValue(forKey: id)?.removeFromSuperview()
@@ -1055,7 +1046,8 @@ enum RingApp {
                     launcherChildTiles[id] = tile
                     launcherChildGroup.addSubview(tile)
                 }
-                let iconRect = launcherChildIconRect(at: menu.layout.point(index), layout: menu.layout, index: index)
+                let iconRect = launcherChildTileLayout(menu.layout, index: index, mainSpacing: mainSpacing)
+                    .iconRect(at: menu.layout.point(index))
                 tile.place(in: iconRect)
                 tile.artwork.render = {
                     child.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: child.available ? 1 : 0.45)
@@ -1145,30 +1137,23 @@ enum RingApp {
         if let pid = app.running?.pid, let badge = itemCounts[pid]?.badge { drawBadge(badge, on: iconRect) }
     }
 
-    private func drawSecondaryEntry(_ app: RingApp, at point: CGPoint, spacing: Double) {
-        let font = NSFont.systemFont(ofSize: min(10, max(8, spacing * 0.24)), weight: .medium)
-        let labelHeight = font.pointSize + 3
-        // Leave room for at least one glyph and the ellipsis on the densest page.
-        let width = min(54, max(19, spacing * 0.70))
-        let iconSize = min(34, spacing * 0.63, spacing - labelHeight - 0.5)
-        // AppKit leaves some space above the glyphs inside the label rect.
-        let gap: CGFloat = spacing < 32 ? -2 : 1
-        let iconCenter = CGPoint(x: point.x, y: point.y + (labelHeight + gap) / 2)
-        drawApp(app, at: iconCenter, size: iconSize)
-
-        let label = NSRect(x: point.x - width / 2, y: point.y - (iconSize + labelHeight + gap) / 2,
-                           width: width, height: labelHeight)
-        RingCenterLabel.text(app.name, in: label, font: font, color: ink, wraps: false)
+    private func drawLauncherName(_ name: String, available: Bool, highlighted: Bool,
+                                  tile: LauncherTileLayout, at point: CGPoint) {
+        guard tile.labelHeight > 0 else { return }
+        let font = NSFont.systemFont(ofSize: tile.fontSize, weight: highlighted ? .semibold : .regular)
+        RingCenterLabel.text(name, in: tile.labelRect(at: point), font: font,
+                             color: available ? ink : muted, wraps: false)
     }
 
     private func updateTiles() {
         let menus = visibleLauncherMenus
-        updateLauncherChildTiles(menus)
         appGroup.isHidden = showsActionLauncher
         let apps = showsActionLauncher ? [] : visibleRingApps
         let appIDs = Set(apps.map(\.id))
         let spacing = appSpacing(count: apps.count)
-        let size = min(34, spacing * 0.76)
+        updateLauncherChildTiles(menus, mainSpacing: spacing)
+        let layout = LauncherTileLayout(spacing: spacing, maxIconSize: 34,
+                                        showsName: showsLauncher && options.launcherShowsItemNames)
         let highlightID = isDraggingApp ? nil : highlightedTile?.id
         let replacedEntries = Set(menus.filter { $0.layout.replacesEntry }.map(\.id))
         for id in appTiles.keys.filter({ !appIDs.contains($0) }) { appTiles.removeValue(forKey: id)?.removeFromSuperview() }
@@ -1178,13 +1163,13 @@ enum RingApp {
             if fresh { appTiles[app.id] = tile; appGroup.addSubview(tile) }
             tile.isHidden = app.favorite.map { replacedEntries.contains($0.id) } ?? false
             let p = RingGeometry.appIconCenter(index: index, count: apps.count)
-            let isSecondary = app.favorite?.item.secondary != nil
-            let side = isSecondary ? min(54, spacing) + 4 : size + 20
+            let side = max(layout.labelWidth + 4, layout.height + 4, layout.iconSize + 20)
             tile.place(in: CGRect(x: p.x - side / 2, y: p.y - side / 2, width: side, height: side))
             let highlighted = app.id == highlightID
             tile.artwork.render = { [weak self] in
-                if isSecondary { self?.drawSecondaryEntry(app, at: p, spacing: spacing) }
-                else { self?.drawApp(app, at: p, size: size) }
+                let icon = layout.iconRect(at: p)
+                self?.drawApp(app, at: CGPoint(x: icon.midX, y: icon.midY), size: layout.iconSize)
+                self?.drawLauncherName(app.name, available: app.available, highlighted: highlighted, tile: layout, at: p)
             }
             tile.update(highlighted: highlighted, animated: window?.isVisible == true)
             if fresh, window?.isVisible == true { tile.reveal(index: index, count: apps.count) }

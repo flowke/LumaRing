@@ -66,6 +66,7 @@ struct Options: Codable {
     var appPageSize = RingGeometry.appPageSize
     var launcherPageSize = RingGeometry.appPageSize
     var launcherSecondaryStyle = LauncherSecondaryStyle.arc
+    var launcherShowsItemNames = true
     var windowPageSize = RingGeometry.windowPageSize
     var launcherItems: [LauncherItem] = []
     var launcherApps: [LauncherApp] { launcherItems.compactMap(\.application) }
@@ -88,6 +89,7 @@ struct Options: Codable {
     init() {}
     private enum CodingKeys: String, CodingKey {
         case theme, ringMaterial, centerTitleSize, loggingEnabled, actionProfiles, actionRingApps, shortcut, actionShortcut, holdToSelect, trackpadTap, threeFingerPinch, ringSize, previews, previewWidth, includeMinimized, sortByName, excludedBundleIDs, appPageSize, launcherPageSize, launcherSecondaryStyle, windowPageSize, appContentModes, launcherItems
+        case launcherShowsItemNames
     }
     private enum LegacyKeys: String, CodingKey { case launcherApps }
     init(from decoder: Decoder) throws {
@@ -128,6 +130,7 @@ struct Options: Codable {
         launcherPageSize = min(allowed.upperBound, max(allowed.lowerBound,
             try c.decodeIfPresent(Int.self, forKey: .launcherPageSize) ?? appPageSize))
         launcherSecondaryStyle = (try? c.decode(LauncherSecondaryStyle.self, forKey: .launcherSecondaryStyle)) ?? .arc
+        launcherShowsItemNames = (try? c.decode(Bool.self, forKey: .launcherShowsItemNames)) ?? true
         windowPageSize = min(RingGeometry.windowPageSizeRange.upperBound, max(RingGeometry.windowPageSizeRange.lowerBound,
             try c.decodeIfPresent(Int.self, forKey: .windowPageSize) ?? RingGeometry.windowPageSize))
     }

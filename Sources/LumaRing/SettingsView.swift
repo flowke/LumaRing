@@ -9,12 +9,11 @@ extension Notification.Name {
 }
 
 enum SettingsSection: CaseIterable, Identifiable {
-    case general, appearance, launcher, apps, actions, permissions, about, guide
+    case general, launcher, apps, actions, permissions, about, guide
     var id: Self { self }
     var title: String {
         switch self {
         case .general: return L10n.text("通用", "General")
-        case .appearance: return L10n.text("外观", "Appearance")
         case .launcher: return L10n.text("启动器", "Launcher")
         case .apps: return L10n.text("应用", "Apps")
         case .actions: return L10n.text("快捷操作", "Actions")
@@ -26,7 +25,6 @@ enum SettingsSection: CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: return "keyboard"
-        case .appearance: return "circle.lefthalf.filled"
         case .launcher: return "circle.circle"
         case .apps: return "square.grid.2x2"
         case .actions: return "bolt"
@@ -38,6 +36,8 @@ enum SettingsSection: CaseIterable, Identifiable {
 }
 
 struct SettingsView: View {
+    static let defaultWidth: CGFloat = 900
+
     @ObservedObject var preferences = Preferences.shared
     @ObservedObject var updates = UpdateService.shared
     @ObservedObject var browserTabs = BrowserTabService.shared
@@ -75,11 +75,11 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         switch selectedSection {
                         case .general: general
-                        case .appearance: appearance
                         case .launcher:
-                            LauncherSettingsView(items: $preferences.options.launcherItems,
-                                pageSize: $preferences.options.launcherPageSize,
-                                secondaryStyle: $preferences.options.launcherSecondaryStyle) { app in
+                            LauncherSettingsView(options: $preferences.options,
+                                shortcutError: preferences.shortcutError,
+                                screenCaptureGranted: preferences.screenCaptureGranted,
+                                onSelectPermissions: { selectedSection = .permissions }) { app in
                                 VStack(alignment: .leading, spacing: 10) {
                                     Text(app.name).font(.headline)
                                     browserModePicker(for: app.bundleID, name: app.name)
@@ -89,11 +89,7 @@ struct SettingsView: View {
                                 }.padding(14).frame(width: 290, alignment: .leading)
                             }
                         case .apps: appFilter
-                        case .actions:
-                            card(L10n.text("应用内的常用操作", "Shortcuts for each app")) {
-                                ActionSettingsView(profiles: $preferences.options.actionProfiles,
-                                    invocations: preferences.options.invocationShortcuts)
-                            }
+                        case .actions: actions
                         case .permissions: permissions
                         case .about: about
                         case .guide: guide
@@ -103,7 +99,7 @@ struct SettingsView: View {
             }.frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         }
         .background(Color(nsColor: .windowBackgroundColor))
-        .frame(minWidth: 680, idealWidth: 680, minHeight: 620, idealHeight: 690)
+        .frame(minWidth: 680, idealWidth: Self.defaultWidth, minHeight: 620, idealHeight: 690)
         .environment(\.locale, preferences.language.locale)
         .onAppear { refresh() }
         .onReceive(NotificationCenter.default.publisher(for: .lumaRingSelectSettingsSection)) { notification in
@@ -138,29 +134,16 @@ struct SettingsView: View {
 
     private var general: some View {
         Group {
-            card(L10n.text("打开轮盘", "Open the ring")) {
-                HStack {
-                    Text(L10n.text("切换应用", "App switcher"))
-                    Spacer()
-                    ShortcutRecorder(shortcut: $preferences.options.shortcut).frame(width: 145, height: 30)
-                        .help(L10n.text("点击录入快捷键。单键会占用该键的全局输入。", "Click to record a shortcut. A single key is reserved system-wide."))
+            card {
+                settingsPicker(L10n.text("语言", "Language"), selection: $preferences.language) {
+                    ForEach(AppLanguage.allCases, id: \.self) { Text($0.title).tag($0) }
                 }
-                if let error = preferences.shortcutError { warning(error) }
-                HStack {
-                    Text(L10n.text("快捷操作", "App actions"))
-                    Spacer()
-                    ShortcutRecorder(shortcut: $preferences.options.actionShortcut).frame(width: 145, height: 30)
-                    if preferences.options.actionShortcut != nil {
-                        Button { preferences.options.actionShortcut = nil } label: { Image(systemName: "xmark.circle.fill") }
-                            .buttonStyle(.plain).foregroundStyle(.secondary)
-                            .help(L10n.text("清除快捷键", "Clear shortcut"))
-                            .accessibilityLabel(L10n.text("清除快捷操作快捷键", "Clear app actions shortcut"))
-                    }
-                }
-                if preferences.options.invocationConflict {
-                    warning(L10n.text("两个轮盘不能使用相同快捷键。", "The two rings need different shortcuts."))
-                } else if let error = preferences.actionShortcutError { warning(error) }
                 Divider()
+                settingsPicker(L10n.text("主题", "Theme"), selection: $preferences.options.theme) {
+                    ForEach(AppTheme.allCases, id: \.self) { Text($0.title).tag($0) }
+                }
+            }
+            card {
                 Toggle(L10n.text("登录时启动", "Launch at login"), isOn: $loginEnabled).onChange(of: loginEnabled) { _, value in
                     do {
                         if value { try SMAppService.mainApp.register() } else { try SMAppService.mainApp.unregister() }
@@ -170,21 +153,8 @@ struct SettingsView: View {
                 }
                 if let loginError { warning(loginError) }
             }
-            card(L10n.text("如何切换", "Choose how to switch")) {
-                Picker(L10n.text("切换方式", "Selection mode"), selection: $preferences.options.holdToSelect) {
-                    Text(L10n.text("点击切换", "Click to switch")).tag(false)
-                    Text(L10n.text("松手切换", "Release to switch")).tag(true)
-                }.pickerStyle(.segmented).labelsHidden()
-                hint(preferences.options.holdToSelect
-                    ? L10n.text("按住快捷键 → 指向目标 → 松手切换。移出轮盘也可选择。", "Hold the shortcut → point at a target → release. You can move beyond the ring.")
-                    : L10n.text("按快捷键打开轮盘，点击应用、窗口或标签页切换。", "Open the ring, then click an app, window or tab."))
-                HStack {
-                    Text("Esc").fontWeight(.medium)
-                    Text(L10n.text("取消选择", "Cancel selection")).foregroundStyle(.secondary)
-                }.font(.caption)
-            }
             card(L10n.text("触控板", "Trackpad")) {
-                Picker(L10n.text("轻点打开轮盘", "Tap to open"), selection: $preferences.options.trackpadTap) {
+                settingsPicker(L10n.text("轻点打开轮盘", "Tap to open"), selection: $preferences.options.trackpadTap) {
                     ForEach(TrackpadTap.allCases, id: \.self) { Text($0.label).tag($0) }
                 }
                 if preferences.options.trackpadTap != .disabled {
@@ -208,48 +178,38 @@ struct SettingsView: View {
         }
     }
 
-    private var appearance: some View {
-        Group {
-            card(L10n.text("显示", "Display")) {
-                Picker(L10n.text("语言", "Language"), selection: $preferences.language) {
-                    ForEach(AppLanguage.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                Picker(L10n.text("主题", "Theme"), selection: $preferences.options.theme) {
-                    ForEach(AppTheme.allCases, id: \.self) { Text($0.title).tag($0) }
-                }
-                Picker(L10n.text("材质", "Material"), selection: $preferences.options.ringMaterial) {
-                    ForEach(RingMaterialStyle.allCases, id: \.self) { Text($0.title).tag($0).disabled(!$0.isAvailable) }
-                }
-            }
-            card(L10n.text("轮盘", "Ring")) {
+    private func settingsPicker<Selection: Hashable, Content: View>(_ title: String, selection: Binding<Selection>,
+                                                                   @ViewBuilder content: () -> Content) -> some View {
+        HStack {
+            Text(title).accessibilityHidden(true)
+            Spacer()
+            Picker(title, selection: selection, content: content).labelsHidden().fixedSize()
+        }
+    }
+
+    private var actions: some View {
+        let title = L10n.text("打开快捷操作轮盘", "Open the app actions ring")
+        return Group {
+            card {
                 HStack {
-                    Text(L10n.text("直径", "Diameter")).frame(width: 72, alignment: .leading)
-                    Slider(value: $preferences.options.ringSize, in: 400...560, step: 20)
-                    Text("\(Int(preferences.options.ringSize * 236 / 480)) pt").monospacedDigit().frame(width: 58, alignment: .trailing)
+                    Text(title).accessibilityHidden(true)
+                    Spacer()
+                    ShortcutRecorder(shortcut: $preferences.options.actionShortcut).frame(width: 145, height: 30)
+                        .accessibilityLabel(title)
+                        .accessibilityValue(preferences.options.actionShortcut?.display ?? L10n.text("未设置", "Not set"))
+                    if preferences.options.actionShortcut != nil {
+                        Button { preferences.options.actionShortcut = nil } label: { Image(systemName: "xmark.circle.fill") }
+                            .buttonStyle(.plain).foregroundStyle(.secondary)
+                            .help(L10n.text("清除快捷键", "Clear shortcut"))
+                            .accessibilityLabel(L10n.text("清除快捷操作快捷键", "Clear app actions shortcut"))
+                    }
                 }
-                Stepper(value: $preferences.options.centerTitleSize, in: Options.centerTitleSizeRange) {
-                    valueLabel(L10n.text("中央文字", "Center text"), "\(preferences.options.centerTitleSize) pt")
-                }
-                Divider()
-                Stepper(value: $preferences.options.appPageSize, in: RingGeometry.appPageSizeRange) {
-                    valueLabel(L10n.text("每页运行中的应用", "Running apps per page"), "\(preferences.options.appPageSize)")
-                }
-                Stepper(value: $preferences.options.windowPageSize, in: RingGeometry.windowPageSizeRange) {
-                    valueLabel(L10n.text("每页窗口 / 标签页", "Windows / tabs per page"), "\(preferences.options.windowPageSize)")
-                }
+                if preferences.options.invocationConflict { warning(L10n.ringShortcutConflict) }
+                else if let error = preferences.actionShortcutError { warning(error) }
             }
-            card(L10n.text("窗口预览", "Window previews")) {
-                Toggle(L10n.text("悬停时显示预览", "Show previews on hover"), isOn: $preferences.options.previews)
-                HStack {
-                    Text(L10n.text("大小", "Size")).frame(width: 72, alignment: .leading)
-                    Slider(value: $preferences.options.previewWidth, in: 400...960, step: 40)
-                    Text("\(Int(preferences.options.previewWidth)) pt").monospacedDigit().frame(width: 58, alignment: .trailing)
-                }.disabled(!preferences.options.previews)
-                    .help(L10n.text("预览会自动缩小以适应屏幕。最小化窗口不提供图片预览。", "Previews shrink to fit the screen. Minimized windows have no image preview."))
-                if preferences.options.previews && !preferences.screenCaptureGranted {
-                    Button(L10n.text("设置屏幕录制权限…", "Set up Screen Recording access…")) { selectedSection = .permissions }
-                        .font(.caption)
-                }
+            card(L10n.text("应用内的常用操作", "Shortcuts for each app")) {
+                ActionSettingsView(profiles: $preferences.options.actionProfiles,
+                    invocations: preferences.options.invocationShortcuts)
             }
         }
     }
@@ -472,10 +432,6 @@ struct SettingsView: View {
         }.fixedSize(horizontal: false, vertical: true)
     }
 
-    private func valueLabel(_ label: String, _ value: String) -> some View {
-        HStack { Text(label); Spacer(); Text(value).monospacedDigit().foregroundStyle(.secondary) }
-    }
-
     private func hint(_ text: String) -> some View {
         Text(text).font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
     }
@@ -492,9 +448,11 @@ struct SettingsView: View {
         browserTabs.refreshAuthorization(apps)
     }
 
-    private func card<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+    private func card<Content: View>(_ title: String? = nil, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.leading, 2)
+            if let title {
+                Text(title).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).padding(.leading, 2)
+            }
             VStack(alignment: .leading, spacing: 13) {
                 content().font(.system(size: 13))
             }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
@@ -502,6 +460,10 @@ struct SettingsView: View {
                 .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.primary.opacity(0.06)))
         }
     }
+}
+
+extension L10n {
+    static var ringShortcutConflict: String { text("两个轮盘不能使用相同快捷键。", "The two rings need different shortcuts.") }
 }
 
 struct ShortcutRecorder: NSViewRepresentable {

@@ -22,6 +22,35 @@ enum LauncherSecondaryStyle: String, Codable {
     var pageSize: Int { self == .arc ? LauncherArc.pageSize : 3 }
 }
 
+/// Shared icon and one-line title layout in the circle and both kinds of secondary menu.
+struct LauncherTileLayout {
+    let iconSize: CGFloat
+    let fontSize: CGFloat
+    let labelWidth: CGFloat
+    let labelHeight: CGFloat
+    let gap: CGFloat
+
+    init(spacing: CGFloat, maxIconSize: CGFloat, showsName: Bool) {
+        fontSize = min(10, max(7, spacing * 0.30))
+        labelWidth = showsName ? min(56, spacing * 0.80) : 0
+        labelHeight = showsName ? fontSize + 3 : 0
+        gap = showsName && spacing >= 28 ? 1 : 0
+        iconSize = min(maxIconSize, spacing * 0.76, max(1, spacing - labelHeight - gap - 2))
+    }
+
+    var height: CGFloat { iconSize + gap + labelHeight }
+
+    func iconRect(at point: CGPoint) -> CGRect {
+        CGRect(x: point.x - iconSize / 2, y: point.y - height / 2 + gap + labelHeight,
+               width: iconSize, height: iconSize)
+    }
+
+    func labelRect(at point: CGPoint) -> CGRect {
+        CGRect(x: point.x - labelWidth / 2, y: point.y - height / 2,
+               width: labelWidth, height: labelHeight)
+    }
+}
+
 /// Positions and contours in the same coordinates as the main disk.
 struct LauncherSecondaryLayout: Equatable {
     let style: LauncherSecondaryStyle
@@ -57,6 +86,12 @@ struct LauncherSecondaryLayout: Equatable {
     func point(_ index: Int) -> CGPoint {
         if style == .arc { return LauncherArc.point(index: index, count: count, anchor: anchor) }
         return RingGeometry.point(angle: anchor, radius: stripRadius(index))
+    }
+
+    func tileSpacing(at index: Int, mainSpacing: CGFloat) -> CGFloat {
+        if style == .arc { return 2 * LauncherArc.radius * sin(RingGeometry.arcStep / 2) }
+        if index == 0 { return min(mainSpacing, Self.stripStep) }
+        return min(Self.stripStep, stripHalfWidth * 2)
     }
 
     var diskPath: CGPath { Self.diskPath(with: [self]) }

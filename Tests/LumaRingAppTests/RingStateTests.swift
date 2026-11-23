@@ -35,6 +35,7 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(defaults.appPageSize, 12)
         XCTAssertEqual(defaults.launcherPageSize, 12)
         XCTAssertEqual(defaults.launcherSecondaryStyle, .arc)
+        XCTAssertTrue(defaults.launcherShowsItemNames)
         XCTAssertEqual(defaults.windowPageSize, 6)
         let saved = Data(#"{"shortcut":{"keyCode":15,"modifiers":6144,"label":"R"},"hoverDelay":0.5,"ringSize":500,"showAppNames":true,"reduceMotion":true,"excludedBundleIDs":["local.hidden"]}"#.utf8)
         let decoded = try JSONDecoder().decode(Options.self, from: saved)
@@ -44,6 +45,7 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(decoded.appPageSize, 12)
         XCTAssertEqual(decoded.launcherPageSize, 12)
         XCTAssertEqual(decoded.launcherSecondaryStyle, .arc)
+        XCTAssertTrue(decoded.launcherShowsItemNames)
         XCTAssertEqual(decoded.windowPageSize, 6)
         XCTAssertEqual(decoded.previewWidth, 840)
         let enlarged = try JSONDecoder().decode(Options.self, from: Data(#"{"previewWidth":960}"#.utf8))
@@ -61,6 +63,7 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(decoded.launcherPageSize, 8)
         decoded.launcherPageSize = 16
         decoded.launcherSecondaryStyle = .strip
+        decoded.launcherShowsItemNames = false
         let restored = try JSONDecoder().decode(Options.self, from: JSONEncoder().encode(decoded))
         XCTAssertEqual(restored.shortcut.display, "⌃⌥Space")
         XCTAssertTrue(restored.holdToSelect)
@@ -68,6 +71,7 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(restored.appPageSize, 8)
         XCTAssertEqual(restored.launcherPageSize, 16)
         XCTAssertEqual(restored.launcherSecondaryStyle, .strip)
+        XCTAssertFalse(restored.launcherShowsItemNames)
         XCTAssertEqual(restored.previewWidth, 640)
         for (size, expected) in [(0, 400.0), (9999, 560.0)] {
             let options = try JSONDecoder().decode(Options.self, from: Data("{\"ringSize\":\(size)}".utf8))

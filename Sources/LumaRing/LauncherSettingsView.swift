@@ -7,9 +7,10 @@ struct LauncherSettingsView<BrowserControls: View>: View {
     enum Section: Hashable { case items, settings }
     private enum AddMenuAnchor { case preview, list }
 
-    @Binding var items: [LauncherItem]
-    @Binding var pageSize: Int
-    @Binding var secondaryStyle: LauncherSecondaryStyle
+    @Binding var options: Options
+    let shortcutError: String?
+    let screenCaptureGranted: Bool
+    let onSelectPermissions: () -> Void
     @ViewBuilder let browserControls: (LauncherApp) -> BrowserControls
 
     @State private var catalog = LauncherCatalog()
@@ -27,6 +28,8 @@ struct LauncherSettingsView<BrowserControls: View>: View {
     @State private var pendingRemoval: LauncherRecord?
 
     private var ring: LauncherRecord? { records.first { $0.id == editingRing } }
+    private var pageSize: Int { options.launcherPageSize }
+    private var secondaryStyle: LauncherSecondaryStyle { options.launcherSecondaryStyle }
     private var groupName: String { L10n.text("常规", "Standard") }
     private var secondaryName: String { L10n.text("二级圆环", "Secondary ring") }
     private var rowRecords: [LauncherRecord] { ring?.children ?? records }
@@ -48,15 +51,16 @@ struct LauncherSettingsView<BrowserControls: View>: View {
                 .labelsHidden()
                 .fixedSize()
             }
-            LauncherEditorLayout {
+            LauncherEditorLayout(showsSettings: section == .settings) {
                 preview.cardSurface()
                 Group {
                     if section == .items {
-                        editor.frame(minHeight: 242, alignment: .top).padding(12)
+                        editor.frame(minHeight: 242, alignment: .top).padding(12).cardSurface()
                     } else {
-                        LauncherRingSettings(pageSize: $pageSize, secondaryStyle: $secondaryStyle)
+                        LauncherRingSettings(options: $options, shortcutError: shortcutError,
+                            screenCaptureGranted: screenCaptureGranted, onSelectPermissions: onSelectPermissions)
                     }
-                }.cardSurface()
+                }
             }
         }
         .onChange(of: section) { _, value in
@@ -71,7 +75,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
                 settingsChildPage = editingRing == previewingRing ? childPage : 0
             }
         }
-        .onChange(of: items, initial: true) { _, newItems in
+        .onChange(of: options.launcherItems, initial: true) { _, newItems in
             records = catalog.snapshot(newItems)
             if let editingRing, !newItems.contains(where: { $0.id == editingRing }) { closeRing() }
             let lastPage = RingGeometry.pageCount(total: records.count, size: pageSize) - 1
@@ -127,7 +131,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
             LauncherPreview(records: displayed, ringID: expanded?.id,
                             childPage: childRange.lowerBound / secondaryStyle.pageSize,
                             alternateChildCount: alternateCount,
-                            style: secondaryStyle, reorder: allowsEditing ? reorder : nil,
+                            style: secondaryStyle, showsItemNames: options.launcherShowsItemNames, reorder: allowsEditing ? reorder : nil,
                             selectRing: example == nil ? selectPreviewRing : nil)
             HStack(spacing: 16) {
                 if allowsEditing {
@@ -187,7 +191,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
                 HStack(spacing: 8) {
                     Text(secondaryName).lineLimit(1).fixedSize(horizontal: true, vertical: false)
                     TextField(secondaryName, text: Binding(
-                        get: { items.first { $0.id == ring.id }?.secondary?.name ?? "" },
+                        get: { options.launcherItems.first { $0.id == ring.id }?.secondary?.name ?? "" },
                         set: { name in updateRing(ring.id) { $0.name = name } }
                     )).labelsHidden()
                 }
@@ -310,7 +314,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
     }
 
     private func openRing(_ id: String) {
-        guard let index = items.firstIndex(where: { $0.id == id && $0.secondary != nil }) else { return }
+        guard let index = options.launcherItems.firstIndex(where: { $0.id == id && $0.secondary != nil }) else { return }
         addMenuAnchor = nil
         editingRing = id
         page = index / pageSize
@@ -325,30 +329,32 @@ struct LauncherSettingsView<BrowserControls: View>: View {
 
     private func addRing() {
         let item = LauncherItem.secondary(.init(name: secondaryName))
-        items.append(item)
+        options.launcherItems.append(item)
         openRing(item.id)
     }
 
     private func updateRing(_ id: String, _ update: (inout LauncherSecondaryRing) -> Void) {
-        guard let index = items.firstIndex(where: { $0.id == id }), var ring = items[index].secondary else { return }
+        guard let index = options.launcherItems.firstIndex(where: { $0.id == id }),
+              var ring = options.launcherItems[index].secondary else { return }
         update(&ring)
-        items[index] = .secondary(ring)
+        options.launcherItems[index] = .secondary(ring)
     }
 
     private func remove(_ record: LauncherRecord) {
         if let editingRing { updateRing(editingRing) { $0.destinations.removeAll { $0.id == record.id } } }
-        else { items.removeAll { $0.id == record.id } }
+        else { options.launcherItems.removeAll { $0.id == record.id } }
     }
 
     private func move(_ sourceID: String, _ targetID: String, _ parent: String?) -> Bool {
         if let parent {
-            guard let index = items.firstIndex(where: { $0.id == parent }), var ring = items[index].secondary,
+            guard let index = options.launcherItems.firstIndex(where: { $0.id == parent }),
+                  var ring = options.launcherItems[index].secondary,
                   let target = LauncherReorder.moveItem(sourceID, to: targetID, in: &ring.destinations) else { return false }
-            items[index] = .secondary(ring)
+            options.launcherItems[index] = .secondary(ring)
             childPage = target / secondaryStyle.pageSize
         } else {
-            guard let target = LauncherReorder.moveItem(sourceID, to: targetID, in: &items) else { return false }
-            let editedIndex = items.firstIndex { $0.id == editingRing }
+            guard let target = LauncherReorder.moveItem(sourceID, to: targetID, in: &options.launcherItems) else { return false }
+            let editedIndex = options.launcherItems.firstIndex { $0.id == editingRing }
             page = (editedIndex ?? target) / pageSize
         }
         return true
@@ -380,11 +386,11 @@ struct LauncherSettingsView<BrowserControls: View>: View {
                     ring.destinations += new
                 }
             } else {
-                var seen = Set(items.map(\.id))
+                var seen = Set(options.launcherItems.map(\.id))
                 let new = added.filter { seen.insert($0.id).inserted }
                 guard !new.isEmpty else { return }
-                page = items.count / pageSize
-                items += new.map(LauncherItem.destination)
+                page = options.launcherItems.count / pageSize
+                options.launcherItems += new.map(LauncherItem.destination)
             }
         }
         if let window = NSApp.mainWindow ?? NSApp.keyWindow { panel.beginSheetModal(for: window, completionHandler: completion) }
@@ -393,43 +399,125 @@ struct LauncherSettingsView<BrowserControls: View>: View {
 }
 
 private struct LauncherRingSettings: View {
-    @Binding var pageSize: Int
-    @Binding var secondaryStyle: LauncherSecondaryStyle
+    @Binding var options: Options
+    let shortcutError: String?
+    let screenCaptureGranted: Bool
+    let onSelectPermissions: () -> Void
 
     var body: some View {
-        let capacity = L10n.text("主圆环每页条目数", "Main ring items per page")
-        let display = L10n.text("二级菜单展示方式", "Secondary menu style")
-        VStack(spacing: 0) {
-            HStack(spacing: 10) {
-                Text(capacity).accessibilityHidden(true)
-                Spacer(minLength: 0)
-                Text("\(pageSize)").monospacedDigit().accessibilityHidden(true)
-                Stepper(capacity, value: $pageSize, in: RingGeometry.appPageSizeRange)
-                    .labelsHidden().accessibilityValue("\(pageSize)")
-            }.padding(.vertical, 10)
-            Divider()
-            HStack(spacing: 10) {
-                Text(display).accessibilityHidden(true)
-                Spacer(minLength: 0)
-                Picker(display, selection: $secondaryStyle) {
-                    Text(L10n.text("圆弧", "Arc")).tag(LauncherSecondaryStyle.arc)
-                    Text(L10n.text("长条", "Strip")).tag(LauncherSecondaryStyle.strip)
-                }.pickerStyle(.segmented).labelsHidden().fixedSize()
-            }.padding(.vertical, 10)
+        VStack(spacing: 12) {
+            group(L10n.text("圆环显示", "Ring display")) {
+                row(L10n.text("材质", "Material")) { title in
+                    Picker(title, selection: $options.ringMaterial) {
+                        ForEach(RingMaterialStyle.allCases, id: \.self) { style in
+                            Text(style.title).tag(style).disabled(!style.isAvailable)
+                        }
+                    }.labelsHidden().fixedSize()
+                }
+                Divider()
+                sliderRow(L10n.text("直径", "Diameter"), value: $options.ringSize, range: 400...560, step: 20,
+                    display: "\(Int(options.ringSize * RingGeometry.appOuter * 2 / RingGeometry.canvas)) pt")
+                Divider()
+                stepperRow(L10n.text("中央文字字号", "Center text size"), value: $options.centerTitleSize,
+                    range: Options.centerTitleSizeRange, unit: " pt")
+                Divider()
+                row(L10n.text("二级菜单展示方式", "Secondary menu style")) { title in
+                    Picker(title, selection: $options.launcherSecondaryStyle) {
+                        Text(L10n.text("圆弧", "Arc")).tag(LauncherSecondaryStyle.arc)
+                        Text(L10n.text("长条", "Strip")).tag(LauncherSecondaryStyle.strip)
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+                Divider()
+                row(L10n.text("显示项目名称", "Show item names")) { title in
+                    Toggle(title, isOn: $options.launcherShowsItemNames).toggleStyle(.switch).labelsHidden()
+                }
+            }
+            group(L10n.text("每页数量", "Items per page")) {
+                stepperRow(L10n.text("常规项目", "Standard items"), value: $options.launcherPageSize, range: RingGeometry.appPageSizeRange)
+                Divider()
+                stepperRow(L10n.text("运行中的应用", "Running apps"), value: $options.appPageSize, range: RingGeometry.appPageSizeRange)
+                Divider()
+                stepperRow(L10n.text("窗口 / 标签页", "Windows / tabs"), value: $options.windowPageSize, range: RingGeometry.windowPageSizeRange)
+            }
+            group(L10n.text("窗口预览", "Window previews")) {
+                row(L10n.text("悬停时显示预览", "Show previews on hover")) { title in
+                    Toggle(title, isOn: $options.previews).toggleStyle(.switch).labelsHidden()
+                }
+                Divider()
+                sliderRow(L10n.text("大小", "Size"), value: $options.previewWidth, range: 400...960, step: 40,
+                    display: "\(Int(options.previewWidth)) pt")
+                    .disabled(!options.previews)
+                    .help(L10n.text("预览会自动缩小以适应屏幕。最小化窗口不提供图片预览。", "Previews shrink to fit the screen. Minimized windows have no image preview."))
+                if options.previews && !screenCaptureGranted {
+                    Divider()
+                    Button(L10n.text("设置屏幕录制权限…", "Set up Screen Recording access…"), action: onSelectPermissions)
+                        .padding(.vertical, 6)
+                }
+            }
+            group(L10n.text("轮盘操作", "Ring actions")) {
+                row(L10n.text("打开轮盘快捷键", "Open ring shortcut")) { title in
+                    ShortcutRecorder(shortcut: $options.shortcut).frame(width: 145, height: 30)
+                        .accessibilityLabel(title)
+                        .accessibilityValue(options.shortcut.display)
+                        .help(L10n.text("点击录入快捷键。单键会占用该键的全局输入。", "Click to record a shortcut. A single key is reserved system-wide."))
+                }
+                if let warning = options.invocationConflict ? L10n.ringShortcutConflict : shortcutError {
+                    Text(warning).font(.caption).foregroundStyle(.orange)
+                        .fixedSize(horizontal: false, vertical: true).padding(.bottom, 6)
+                }
+                Divider()
+                row(L10n.text("切换方式", "Selection mode")) { title in
+                    Picker(title, selection: $options.holdToSelect) {
+                        Text(L10n.text("点击切换", "Click to switch")).tag(false)
+                        Text(L10n.text("松手切换", "Release to switch")).tag(true)
+                    }.pickerStyle(.segmented).labelsHidden().fixedSize()
+                }
+            }
         }
         .font(.callout)
-        .padding(.horizontal, 12)
-        .padding(.vertical, 4)
+    }
+
+    private func group<Content: View>(_ title: String, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text(title).font(.system(size: 12, weight: .semibold)).accessibilityAddTraits(.isHeader)
+                .padding(.top, 10).padding(.bottom, 2)
+            content()
+        }.padding(.horizontal, 12).padding(.bottom, 5).cardSurface()
+    }
+
+    private func row<Control: View>(_ title: String, @ViewBuilder control: (String) -> Control) -> some View {
+        HStack(spacing: 10) {
+            Text(title).accessibilityHidden(true)
+            Spacer(minLength: 8)
+            control(title)
+        }.frame(minHeight: 33)
+    }
+
+    private func stepperRow(_ title: String, value: Binding<Int>, range: ClosedRange<Int>, unit: String = "") -> some View {
+        let display = "\(value.wrappedValue)\(unit)"
+        return row(title) { title in
+            Text(display).monospacedDigit().accessibilityHidden(true)
+            Stepper(title, value: value, in: range).labelsHidden().accessibilityValue(display)
+        }
+    }
+
+    private func sliderRow(_ title: String, value: Binding<Double>, range: ClosedRange<Double>, step: Double, display: String) -> some View {
+        row(title) { title in
+            Slider(value: value, in: range, step: step) { Text(title) }
+                .labelsHidden().frame(maxWidth: 145).accessibilityValue(display)
+            Text(display).monospacedDigit().accessibilityHidden(true)
+        }
     }
 }
 
 private struct LauncherEditorLayout: Layout {
+    let showsSettings: Bool
     private let spacing: CGFloat = 12
     private let twoColumnMinimum: CGFloat = 620
 
     private func widths(for width: CGFloat) -> (preview: CGFloat, list: CGFloat) {
         guard width >= twoColumnMinimum else { return (width, width) }
-        let list = min(340, max(228, (width - spacing) * 0.38))
+        let list = showsSettings ? min(500, (width - spacing) * 0.57) : min(340, max(228, (width - spacing) * 0.38))
         return (width - spacing - list, list)
     }
 
@@ -508,6 +596,7 @@ private struct LauncherPreview: View {
     let childPage: Int
     let alternateChildCount: Int
     let style: LauncherSecondaryStyle
+    let showsItemNames: Bool
     let reorder: LauncherReorder?
     let selectRing: ((String) -> Void)?
 
@@ -538,8 +627,7 @@ private struct LauncherPreview: View {
                 if let arc { path.addPath(Path(arc), transform: transform) }
             }
             let holeSide = RingGeometry.appCenterRadius * 2 * scale
-            let primarySpacing = 2 * RingGeometry.appRadius * sin(.pi / Double(max(records.count, 2))) * scale
-            let childSpacing = 2 * LauncherArc.radius * sin(RingGeometry.arcStep / 2) * scale
+            let primarySpacing = 2 * RingGeometry.appRadius * sin(.pi / Double(max(records.count, 2)))
             ZStack {
                 surface.fill(Color.primary.opacity(0.075))
                 surface.stroke(Color.primary.opacity(0.10), lineWidth: 0.6)
@@ -557,7 +645,7 @@ private struct LauncherPreview: View {
                 ForEach(Array(records.enumerated()), id: \.element.id) { index, record in
                     if style == .arc || !replacedSlots.contains(index) {
                         let point = RingGeometry.appIconCenter(index: index, count: records.count).applying(transform)
-                        previewTile(record, spacing: primarySpacing, scale: scale, showsLabel: records.count <= 8,
+                        previewTile(record, spacing: primarySpacing, scale: scale, maxIconSize: 34,
                                     highlighted: index == ringIndex, parent: nil).position(point)
                     }
                 }
@@ -565,12 +653,10 @@ private struct LauncherPreview: View {
                     ForEach(Array(menu.children.enumerated()), id: \.element.id) { index, record in
                         let point = menu.layout.point(index).applying(transform)
                         let inPrimarySlot = menu.layout.replacesEntry && index == 0
-                        let spacing = style == .arc ? childSpacing : (inPrimarySlot
-                            ? min(primarySpacing, LauncherSecondaryLayout.stripStep * scale)
-                            : min(LauncherSecondaryLayout.stripStep, menu.layout.stripHalfWidth * 2) * scale)
+                        let spacing = menu.layout.tileSpacing(at: index, mainSpacing: primarySpacing)
                         let dragAsGroup = inPrimarySlot && menu.id != ringID
-                        previewTile(record, spacing: spacing, scale: scale, showsLabel: !inPrimarySlot || records.count <= 8,
-                                    highlighted: false, parent: dragAsGroup ? nil : menu.id, compact: style == .strip,
+                        previewTile(record, spacing: spacing, scale: scale, maxIconSize: 28,
+                                    highlighted: false, parent: dragAsGroup ? nil : menu.id,
                                     groupEntry: dragAsGroup ? menu.id : nil,
                                     allowsDrag: menu.id == ringID || dragAsGroup).position(point)
                     }
@@ -579,26 +665,23 @@ private struct LauncherPreview: View {
         }
     }
 
-    private func previewTile(_ record: LauncherRecord, spacing: CGFloat, scale: CGFloat, showsLabel: Bool,
-                             highlighted: Bool, parent: String?, compact: Bool = false,
+    private func previewTile(_ record: LauncherRecord, spacing: CGFloat, scale: CGFloat, maxIconSize: CGFloat,
+                             highlighted: Bool, parent: String?,
                              groupEntry: String? = nil, allowsDrag: Bool = true) -> some View {
         let isSecondary = record.item.secondary != nil
-        let width = min(80, spacing * (isSecondary ? 0.70 : 0.82))
-        let label = isSecondary || (showsLabel && width >= 28)
-        let titleSize = min(11, max(8, width * 0.2))
-        let iconSize = min(40, (compact ? 28 : 36) * scale, width * 0.78)
-        let size = isSecondary ? min(iconSize, max(1, spacing - titleSize - 6)) : iconSize
-        let tile = VStack(spacing: isSecondary ? 1 : 3) {
-            LauncherItemIcon(record: record, size: size)
+        let layout = LauncherTileLayout(spacing: spacing, maxIconSize: maxIconSize, showsName: showsItemNames)
+        let width = max(layout.labelWidth, layout.iconSize + 4) * scale
+        let tile = VStack(spacing: layout.gap * scale) {
+            LauncherItemIcon(record: record, size: layout.iconSize * scale)
                 .background(highlighted ? Color.accentColor.opacity(0.17) : .clear, in: RoundedRectangle(cornerRadius: 5))
-            if label {
-                Text(record.name).font(.system(size: titleSize, weight: highlighted ? .semibold : .regular))
+            if showsItemNames {
+                Text(record.name).font(.system(size: layout.fontSize * scale, weight: highlighted ? .semibold : .regular))
                     .lineLimit(1)
                     .foregroundStyle(highlighted ? Color.accentColor : Color.secondary)
+                    .frame(width: layout.labelWidth * scale, height: layout.labelHeight * scale)
             }
         }
-        .padding(.horizontal, 2)
-        .frame(width: width, height: label ? size + titleSize + (isSecondary ? 6 : 10) : min(width, size + 8))
+        .frame(width: width, height: max(layout.height, layout.iconSize + 4) * scale)
         .contentShape(Rectangle())
 
         let control = Group {

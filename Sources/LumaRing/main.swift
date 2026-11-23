@@ -232,7 +232,7 @@ import SwiftUI
             let window = SettingsWindow(contentViewController: host)
             window.title = L10n.text("LumaRing 设置", "LumaRing Settings")
             window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
-            window.setContentSize(NSSize(width: 680, height: 690))
+            window.setContentSize(NSSize(width: SettingsView.defaultWidth, height: 690))
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
