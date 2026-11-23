@@ -23,13 +23,199 @@ final class LauncherTests: XCTestCase {
     private func point(_ index: Int, count: Int) -> CGPoint {
         RingGeometry.point(angle: RingGeometry.angle(index: index, count: count), radius: RingGeometry.appRadius)
     }
-    func testOldPreferencesDefaultToEmptyAndRoundTripPreservesOrder() throws {
-        let old = try JSONDecoder().decode(Options.self, from: Data("{}".utf8))
-        XCTAssertTrue(old.launcherApps.isEmpty)
-        var options = old; options.launcherApps = records().map(\.app)
-        let decoded = try JSONDecoder().decode(Options.self, from: JSONEncoder().encode(options))
-        XCTAssertEqual(decoded.launcherApps, options.launcherApps)
-        XCTAssertEqual(LauncherApp.unique(options.launcherApps + options.launcherApps), options.launcherApps)
+
+    func testLauncherDropReordersWithinTheSourceRingWhenAnAppAppearsInBoth() {
+        let apps = records().compactMap(\.application)
+        let original = apps.map(LauncherDestination.application)
+        var primary = original.map(LauncherItem.destination)
+        var secondary = original
+        let ringID = "ring:\(UUID())"
+        let reorder = LauncherReorder(scope: "launcher-test") { source, target, parent in
+            if parent == ringID {
+                return LauncherReorder.moveItem(source, to: target, in: &secondary) != nil
+            }
+            return LauncherReorder.moveItem(source, to: target, in: &primary) != nil
+        }
+        let first = apps[0].id, last = apps[2].id
+        let mainPayload = reorder.payload(for: first, parent: nil)
+        let secondaryPayload = reorder.payload(for: last, parent: ringID)
+
+        XCTAssertFalse(reorder.accept([mainPayload], target: last, parent: ringID))
+        XCTAssertFalse(reorder.accept([secondaryPayload], target: first, parent: nil))
+        XCTAssertFalse(reorder.accept([mainPayload], target: first, parent: nil))
+        XCTAssertTrue(reorder.accept([mainPayload], target: last, parent: nil))
+        XCTAssertEqual(primary.map(\.id), [apps[1].id, last, first])
+        XCTAssertEqual(secondary, original)
+        XCTAssertTrue(reorder.accept([secondaryPayload], target: first, parent: ringID))
+        XCTAssertEqual(secondary.map(\.id), [last, first, apps[1].id])
+        XCTAssertEqual(primary.map(\.id), [apps[1].id, last, first])
+    }
+
+    func testLegacyFavoritesMigrateInOrderAndAnEmptyNewListTakesPrecedence() throws {
+        struct LegacyOptions: Encodable { let launcherApps: [LauncherApp]; let launcherItems: [LauncherItem]? }
+        let apps = records().compactMap(\.application).reversed()
+        let legacyApps = Array(apps) + apps.prefix(1)
+        let old = try JSONEncoder().encode(LegacyOptions(launcherApps: legacyApps, launcherItems: nil))
+        let migrated = try JSONDecoder().decode(Options.self, from: old)
+        XCTAssertEqual(migrated.launcherApps, Array(apps))
+
+        let folder = try XCTUnwrap(LauncherFolder(FileManager.default.temporaryDirectory))
+        var options = migrated
+        options.launcherItems.insert(.destination(.folder(folder)), at: 1)
+        let firstApp = try XCTUnwrap(apps.first)
+        options.launcherItems.insert(.secondary(.init(name: "Tools", destinations: [.folder(folder), .application(firstApp)])), at: 2)
+        let saved = try JSONEncoder().encode(options)
+        XCTAssertEqual(try JSONDecoder().decode(Options.self, from: saved).launcherItems, options.launcherItems)
+
+        let cleared = try JSONEncoder().encode(LegacyOptions(launcherApps: legacyApps, launcherItems: []))
+        XCTAssertTrue(try JSONDecoder().decode(Options.self, from: cleared).launcherItems.isEmpty)
+    }
+
+    @MainActor func testSecondaryRingKeepsHoverAcrossGapAndRequiresSameChildOnClick() async throws {
+        let view = view(1)
+        let folder = try XCTUnwrap(LauncherFolder(FileManager.default.temporaryDirectory))
+        let folderItem = LauncherItem.destination(.folder(folder))
+        let folderRecord = LauncherRecord(item: folderItem, icon: icon, available: true)
+        let child = records(1)[0]
+        let group = LauncherSecondaryRing(name: "Tools", destinations: [.application(try XCTUnwrap(child.application)), .folder(folder)])
+        view.launcherApps.insert(LauncherRecord(secondary: group, children: [child, folderRecord]), at: 0)
+        view.launcherApps.append(folderRecord)
+        view.enterDefaultLauncherMode()
+        let anchor = RingGeometry.angle(index: 0, count: 3)
+        let first = LauncherArc.point(index: 0, count: 2, anchor: anchor)
+        let second = LauncherArc.point(index: 1, count: 2, anchor: anchor)
+        let gap = RingGeometry.point(angle: anchor, radius: LauncherArc.inner - 5)
+        var opened: [String] = []
+        view.onLaunchApp = { opened.append($0.id) }
+        view.onOpenFolder = { opened.append($0.path) }
+
+        view.updateHover(at: point(0, count: 3)); view.updateHover(at: gap)
+        view.beginPointer(at: first); view.endPointer(at: second)
+        XCTAssertTrue(opened.isEmpty)
+        view.beginPointer(at: second); view.endPointer(at: second)
+        XCTAssertEqual(opened, [folder.path])
+        view.beginPointer(at: point(2, count: 3)); view.endPointer(at: point(2, count: 3))
+        XCTAssertEqual(opened, [folder.path, folder.path])
+
+        view.selectingWithShortcut = true
+        view.updateHover(at: point(0, count: 3)); view.updateHover(at: gap)
+        view.updateHover(at: first)
+        view.activateHovered()
+        XCTAssertEqual(opened.last, child.id)
+        view.selectingWithShortcut = false
+        view.updateHover(at: point(0, count: 3))
+        view.navigate(.toggleSecondary)
+        view.navigate(.step(1))
+        view.navigate(.activate)
+        XCTAssertEqual(opened.last, folder.path)
+        XCTAssertTrue(view.toggleLauncherFromCenter(at: RingGeometry.center))
+        view.activate(at: second)
+        XCTAssertEqual(opened, [folder.path, folder.path, child.id, folder.path])
+    }
+
+    func testStripUsesTheEntrySlotAndKeepsOneContinuousContour() {
+        for index in 0..<24 {
+            let anchor = RingGeometry.angle(index: index, count: 24)
+            let single = LauncherSecondaryLayout(style: .strip, anchor: anchor, count: 1)
+            XCTAssertEqual(single.diskPath, RingGeometry.diskPath)
+            XCTAssertEqual(single.point(0), point(index, count: 24))
+            XCTAssertEqual(single.childIndex(at: single.point(0), isEntry: true), 0)
+            XCTAssertNil(single.childIndex(at: single.point(0), isEntry: false))
+            for count in 2...LauncherSecondaryStyle.strip.pageSize {
+                let strip = LauncherSecondaryLayout(style: .strip, anchor: anchor, count: count)
+                XCTAssertNil(strip.arcPath)
+                XCTAssertTrue(CGRect(x: 0, y: 0, width: 480, height: 480).contains(strip.surfaceBounds))
+                for step in 0...96 {
+                    let radius = RingGeometry.appRadius + Double(step)
+                    guard radius <= RingGeometry.appRadius + Double(count - 1) * LauncherSecondaryLayout.stripStep else { break }
+                    let position = RingGeometry.point(angle: anchor, radius: radius)
+                    XCTAssertTrue(strip.diskPath.contains(position))
+                    XCTAssertNotNil(strip.childIndex(at: position, isEntry: true))
+                }
+                for child in 0..<count {
+                    XCTAssertEqual(strip.childIndex(at: strip.point(child), isEntry: child == 0), child)
+                }
+                let beside = RingGeometry.point(angle: anchor + .pi / 3, radius: 145)
+                XCTAssertFalse(strip.diskPath.contains(beside))
+                XCTAssertNil(strip.childIndex(at: beside, isEntry: false))
+            }
+        }
+    }
+
+    @MainActor func testStripActivatesTheChildInTheEntryAndKeepsInputAcrossPages() async {
+        let view = view(2)
+        view.options.launcherSecondaryStyle = .strip
+        let children = records(5)
+        let group = LauncherSecondaryRing(name: "Tools", destinations: children.compactMap(\.application).map(LauncherDestination.application))
+        view.launcherApps.insert(LauncherRecord(secondary: group, children: children), at: 0)
+        view.enterDefaultLauncherMode()
+        let layout = LauncherSecondaryLayout(style: .strip, anchor: RingGeometry.angle(index: 0, count: 3), count: 3)
+        let entry = layout.point(0), outer = layout.point(1)
+        var opened: [String] = []
+        view.onLaunchApp = { opened.append($0.id) }
+        // Both positions must be clickable immediately, with no mouse-move event.
+        view.beginPointer(at: entry); view.endPointer(at: outer)
+        XCTAssertTrue(opened.isEmpty)
+        view.beginPointer(at: entry); view.endPointer(at: entry)
+        view.beginPointer(at: outer); view.endPointer(at: outer)
+        XCTAssertEqual(opened, children.prefix(2).map(\.id))
+
+        view.updateHover(at: outer)
+        let nextPage = CGPoint(x: view.pageControlsRect.maxX - 2, y: view.pageControlsRect.midY)
+        view.updateHover(at: RingGeometry.center)
+        view.updateHover(at: nextPage)
+        view.beginPointer(at: nextPage); view.endPointer(at: nextPage)
+        view.beginPointer(at: entry); view.endPointer(at: entry)
+        XCTAssertEqual(opened.last, children[3].id)
+        view.updateHover(at: outer)
+        view.navigate(.step(1))
+        view.navigate(.activate)
+        XCTAssertEqual(opened.last, children[0].id)
+
+        view.selectingWithShortcut = true
+        view.updateHover(at: point(2, count: 3))
+        view.updateHover(at: layout.point(2))
+        view.activateHovered()
+        XCTAssertEqual(opened.last, children[2].id)
+    }
+
+    @MainActor func testAdjacentStripsOpenTogetherAndKeepSharedItemsDistinct() async throws {
+        let view = view(2)
+        view.options.launcherSecondaryStyle = .strip
+        let shared = records(1)[0]
+        let first = LauncherSecondaryRing(name: "First")
+        let second = LauncherSecondaryRing(name: "Second")
+        let singleton = LauncherSecondaryRing(name: "Single")
+        view.launcherApps.insert(contentsOf: [
+            LauncherRecord(secondary: first, children: [records(2)[1], shared]),
+            LauncherRecord(secondary: second, children: [records(3)[2], shared]),
+            LauncherRecord(secondary: singleton, children: [shared])
+        ], at: 0)
+        let panel = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 480),
+                             styleMask: .borderless, backing: .buffered, defer: true)
+        panel.contentView = view
+        view.enterDefaultLauncherMode()
+        let firstTip = RingGeometry.point(angle: RingGeometry.angle(index: 0, count: 5), radius: 158)
+        let secondTip = RingGeometry.point(angle: RingGeometry.angle(index: 1, count: 5), radius: 158)
+        let oneChildTip = RingGeometry.point(angle: RingGeometry.angle(index: 2, count: 5), radius: 158)
+        let bounds = view.occupiedScreenFrame
+        for tip in [firstTip, secondTip] {
+            XCTAssertTrue(bounds.contains(panel.convertPoint(toScreen: tip)))
+        }
+        var opened: [String] = []
+        view.onLaunchApp = { opened.append($0.id) }
+        let children = try XCTUnwrap(view.accessibilityChildren() as? [NSAccessibilityElement])
+        XCTAssertEqual(children.filter { $0.accessibilityLabel() == shared.name }.count, 4)
+        view.beginPointer(at: firstTip); view.endPointer(at: secondTip)
+        XCTAssertTrue(opened.isEmpty)
+        view.clearSelection()
+        view.beginPointer(at: firstTip); view.endPointer(at: firstTip)
+        view.updateHover(at: point(3, count: 5))
+        view.beginPointer(at: secondTip); view.endPointer(at: secondTip)
+        view.beginPointer(at: oneChildTip); view.endPointer(at: oneChildTip)
+        view.beginPointer(at: point(2, count: 5)); view.endPointer(at: point(2, count: 5))
+        XCTAssertEqual(opened, Array(repeating: shared.id, count: 3))
+        XCTAssertEqual(view.occupiedScreenFrame, bounds)
     }
     @MainActor func testInvocationOptionRequiresReleaseAndFreshPress() async {
         let view = view()
@@ -87,12 +273,17 @@ final class LauncherTests: XCTestCase {
     @MainActor func testPagingEmptyMissingAppsAndReset() async {
         let view = view(25)
         view.options.appPageSize = 8
+        view.options.launcherPageSize = 12
+        XCTAssertEqual(view.appPageSize, 8)
         view.updateOption(pressed: true)
-        XCTAssertEqual(view.visibleRingApps.count, 8)
-        view.changeAppPage(3)
+        XCTAssertEqual(view.visibleRingApps.count, 12)
+        view.changeAppPage(2)
         XCTAssertEqual(view.visibleRingApps.map(\.id), [.favorite("test.launch.24")])
         view.changeAppPage(1); XCTAssertEqual(view.appPage, 0)
-        view.launcherApps = [LauncherRecord(app: records(1)[0].app, icon: icon, available: false)]
+        view.updateOption(pressed: false)
+        XCTAssertEqual(view.appPageSize, 8)
+        view.updateOption(pressed: true)
+        view.launcherApps = [LauncherRecord(app: records(1)[0].application!, icon: icon, available: false)]
         view.onLaunchApp = { _ in XCTFail("Missing app must not open") }
         view.activate(at: point(0, count: 1))
         view.reset(apps: [], options: Options())
@@ -246,7 +437,7 @@ final class LauncherTests: XCTestCase {
     }
 
     @MainActor func testLaunchFailureDoesNotFallBackToAnotherApp() async {
-        let app = records(1)[0].app
+        let app = records(1)[0].application!
         let missing = ApplicationLauncher(resolve: { _ in nil }, open: { _, _, _ in XCTFail("Unresolved app") })
         missing.launch(app) { XCTAssertFalse($0) }
         let failed = expectation(description: "failed launch")
@@ -282,11 +473,11 @@ final class LauncherTests: XCTestCase {
                        "/System/Applications/Utilities/Terminal.app", "/System/Library/CoreServices/Finder.app"]
         view.launcherApps = view.launcherApps.enumerated().map { index, record in
             let path = samples[index % samples.count]
-            let app = LauncherApp(bundleID: record.app.bundleID, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, path: path)
+            let app = LauncherApp(bundleID: record.application!.bundleID, name: URL(fileURLWithPath: path).deletingPathExtension().lastPathComponent, path: path)
             return LauncherRecord(app: app, icon: NSWorkspace.shared.icon(forFile: path), available: true)
         }
         view.apps = view.launcherApps.enumerated().map { index, record in
-            AppRecord(pid: pid_t(100 + index), bundleID: record.app.bundleID, name: record.app.name, icon: record.icon)
+            AppRecord(pid: pid_t(100 + index), bundleID: record.application!.bundleID, name: record.application!.name, icon: record.icon)
         }
         let panel = NSWindow(contentRect: view.frame, styleMask: [.borderless], backing: .buffered, defer: false)
         panel.contentView = view

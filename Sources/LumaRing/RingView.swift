@@ -14,10 +14,10 @@ enum RingApp {
         return nil
     }
     var id: ID {
-        switch self { case .running(let app): .running(app.pid); case .favorite(let record, _): .favorite(record.app.id) }
+        switch self { case .running(let app): .running(app.pid); case .favorite(let record, _): .favorite(record.id) }
     }
     var name: String {
-        switch self { case .running(let app): app.name; case .favorite(let record, _): record.app.name }
+        switch self { case .running(let app): app.name; case .favorite(let record, _): record.name }
     }
     var icon: NSImage {
         switch self { case .running(let app): app.icon; case .favorite(let record, let app): app?.icon ?? record.icon }
@@ -61,6 +61,7 @@ enum RingApp {
     var afterContextMenu: (() -> Void)?
     var makeWindowMenu: ((WindowRecord) -> NSMenu)?
     var onLaunchApp: ((LauncherApp) -> Void)?
+    var onOpenFolder: ((LauncherFolder) -> Void)?
     var onLauncherModeEntered: (() -> Void)?
     var onLauncherModeEnded: (() -> Void)?
     var makeAppMenu: ((AppRecord) -> NSMenu)?
@@ -76,6 +77,10 @@ enum RingApp {
     private var keyboardPointer: CGPoint?
     private(set) var keyboardSecondary = false
     private var pendingSecondary = false
+    private var expandedLauncherID: String?
+    private var launcherChildPage = 0
+    private var launcherStripPages: [String: Int] = [:]
+    private var hoveredLauncherChild: LauncherMenuLayout.ChildID?
     private var collapseWork: DispatchWorkItem?
     private enum PressTarget {
         case app(RingApp, WindowRecord?, draggable: Bool)
@@ -83,6 +88,7 @@ enum RingApp {
         case close(WindowRecord)
         case background
         case launcher(LauncherRecord)
+        case launcherChild(parent: String, child: String)
         case inactive
     }
     private var pressTarget: PressTarget?
@@ -99,13 +105,17 @@ enum RingApp {
         return app.running
     }
     private let diskMaterial = RingMaterial()
+    private let launcherArcMaterial = RingMaterial()
     private let diskArtwork = RingArtwork()
     private let highlightArtwork = RingArtwork()
+    private let launcherArcArtwork = RingArtwork()
     private let dragArtwork = RingArtwork()
     private let arcGroup = NSView()
     private let appGroup = NSView()
+    private let launcherChildGroup = NSView()
     private var appTiles: [RingApp.ID: RingTile] = [:]
     private var windowTiles: [String: RingTile] = [:]
+    private var launcherChildTiles: [LauncherMenuLayout.ChildID: RingTile] = [:]
     private let accessibleItems = RingAccessibility()
 
     override init(frame frameRect: NSRect) {
@@ -114,12 +124,17 @@ enum RingApp {
         arcGroup.wantsLayer = true
         addSubview(diskMaterial)
         diskMaterial.content.addSubview(diskArtwork)
+        addSubview(launcherArcMaterial)
+        launcherArcMaterial.isHidden = true
         addSubview(highlightArtwork)
         addSubview(appGroup)
+        addSubview(launcherArcArtwork)
+        addSubview(launcherChildGroup)
         addSubview(arcGroup)
         addSubview(dragArtwork)
         diskArtwork.render = { [weak self] in self?.drawDisk() }
         highlightArtwork.render = { [weak self] in self?.drawAppHighlight() }
+        launcherArcArtwork.render = { [weak self] in self?.drawLauncherArc() }
         dragArtwork.render = { [weak self] in self?.drawDrag() }
         arcGroup.isHidden = true
     }
@@ -128,7 +143,10 @@ enum RingApp {
     override func layout() {
         super.layout()
         diskMaterial.frame = bounds; diskArtwork.frame = bounds
+        launcherArcMaterial.frame = bounds
         highlightArtwork.frame = bounds
+        launcherArcArtwork.frame = bounds
+        launcherChildGroup.frame = bounds
         dragArtwork.frame = bounds
         arcGroup.frame = bounds; appGroup.frame = bounds
         diskMaterial.setShape(diskPath)
@@ -145,15 +163,29 @@ enum RingApp {
         return RingGeometry.angle(index: index, count: visibleRingApps.count)
     }
     private var diskPath: CGPath {
-        showsActionLauncher
-            ? CGPath(ellipseIn: CGRect(x: 42, y: 42, width: 396, height: 396), transform: nil)
-            : RingGeometry.diskPath
+        if showsActionLauncher { return CGPath(ellipseIn: CGRect(x: 42, y: 42, width: 396, height: 396), transform: nil) }
+        return stripDiskPath(for: visibleLauncherMenus)
+    }
+
+    private var cachedStripLayouts: [LauncherSecondaryLayout] = []
+    private var cachedStripDisk = RingGeometry.diskPath
+
+    private func stripDiskPath(for menus: [LauncherMenuLayout]) -> CGPath {
+        let layouts = menus.map(\.layout).filter { $0.replacesEntry && $0.count > 1 }
+        if layouts != cachedStripLayouts {
+            cachedStripLayouts = layouts
+            cachedStripDisk = LauncherSecondaryLayout.diskPath(with: layouts)
+        }
+        return cachedStripDisk
     }
     var occupiedScreenFrame: CGRect {
         guard let window else { return .zero }
         var occupied = diskPath.boundingBoxOfPath
         if showsWindowArc {
             occupied = occupied.union(RingGeometry.arcPath(count: visibleWindows.count, anchor: arcAnchor).boundingBoxOfPath)
+        }
+        if let path = launcherArcPath {
+            occupied = occupied.union(path.boundingBoxOfPath)
         }
         return window.convertToScreen(convert(occupied, to: nil))
     }
@@ -162,11 +194,17 @@ enum RingApp {
         let p = windowPoint(index)
         return window.convertToScreen(convert(NSRect(x: p.x - 35, y: p.y - 29, width: 70, height: 58), to: nil))
     }
-    var appPageSize: Int { min(24, max(4, options.appPageSize)) }
+    var appPageSize: Int {
+        let range = RingGeometry.appPageSizeRange
+        return min(range.upperBound, max(range.lowerBound, showsLauncher ? options.launcherPageSize : options.appPageSize))
+    }
     var windowPageSize: Int {
         min(RingGeometry.windowPageSizeRange.upperBound, max(RingGeometry.windowPageSizeRange.lowerBound, options.windowPageSize))
     }
-    var appIconSize: Double { min(34, 2 * RingGeometry.appRadius * sin(.pi / Double(max(visibleRingApps.count, 2))) * 0.76) }
+    private func appSpacing(count: Int) -> Double {
+        2 * RingGeometry.appRadius * sin(.pi / Double(max(count, 2)))
+    }
+    var appIconSize: Double { min(34, appSpacing(count: visibleRingApps.count) * 0.76) }
     private var appPages: Int { RingGeometry.pageCount(total: ringApps.count, size: appPageSize) }
     private var windowPages: Int { RingGeometry.pageCount(total: windows.count, size: windowPageSize) }
     private func windowPoint(_ index: Int) -> CGPoint {
@@ -192,6 +230,90 @@ enum RingApp {
         guard let index = RingGeometry.appIndex(at: point, count: apps.count) else { return nil }
         return apps[index]
     }
+
+    private var usesLauncherStrips: Bool {
+        showsLauncher && !showsActionLauncher && options.launcherSecondaryStyle == .strip
+    }
+
+    private var visibleLauncherMenus: [LauncherMenuLayout] {
+        guard showsLauncher, !showsActionLauncher, usesLauncherStrips || expandedLauncherID != nil else { return [] }
+        return LauncherMenuLayout.visible(records: visibleRingApps.map(\.favorite), style: options.launcherSecondaryStyle,
+                                          active: expandedLauncherID) { id in
+            usesLauncherStrips ? launcherStripPages[id, default: 0] : launcherChildPage
+        }
+    }
+
+    private var activeLauncherMenu: LauncherMenuLayout? {
+        guard let expandedLauncherID else { return nil }
+        return visibleLauncherMenus.first { $0.id == expandedLauncherID }
+    }
+
+    private var launcherChildPages: Int { activeLauncherMenu?.pageCount ?? 1 }
+    private var launcherArcPath: CGPath? { activeLauncherMenu?.layout.arcPath }
+
+    private func launcherChild(at point: CGPoint, holdingShortcut: Bool = false) -> (menu: LauncherMenuLayout, child: LauncherRecord)? {
+        let menus = visibleLauncherMenus
+        guard !menus.isEmpty else { return nil }
+        if !usesLauncherStrips {
+            guard let menu = menus.first, let index = menu.layout.childIndex(at: point, isEntry: false,
+                holdingShortcut: holdingShortcut) else { return nil }
+            return (menu, menu.children[menu.children.startIndex + index])
+        }
+        let dx = point.x - RingGeometry.center.x, dy = point.y - RingGeometry.center.y
+        let radius = hypot(dx, dy)
+        if radius <= RingGeometry.appOuter {
+            guard let slot = RingGeometry.appIndex(at: point, count: visibleRingApps.count),
+                  let menu = menus.first(where: { $0.slot == slot }) else { return nil }
+            return menu.children.first.map { (menu, $0) }
+        }
+        let angle = atan2(dy, dx)
+        func distance(_ menu: LauncherMenuLayout) -> Double {
+            let delta = angle - menu.layout.anchor
+            return abs(atan2(sin(delta), cos(delta)))
+        }
+        if let menu = menus.filter({ $0.layout.count > 1 }).min(by: { distance($0) < distance($1) }),
+           let index = menu.layout.childIndex(at: point, isEntry: false, disk: stripDiskPath(for: menus)) {
+            return (menu, menu.children[menu.children.startIndex + index])
+        }
+        guard holdingShortcut, let slot = RingGeometry.index(at: point, count: visibleRingApps.count,
+                inner: RingGeometry.appOuter, outer: .infinity), let menu = menus.first(where: { $0.slot == slot }),
+              let index = menu.layout.childIndex(at: point, isEntry: false, holdingShortcut: true,
+                                                 disk: stripDiskPath(for: menus)) else { return nil }
+        return (menu, menu.children[menu.children.startIndex + index])
+    }
+
+    private var currentLauncherChild: LauncherRecord? {
+        guard let key = hoveredLauncherChild, let menu = activeLauncherMenu, menu.id == key.parent else { return nil }
+        return menu.children.first { $0.id == key.child }
+    }
+
+    private func resetLauncherArc() {
+        expandedLauncherID = nil
+        launcherChildPage = 0
+        hoveredLauncherChild = nil
+    }
+
+    private func setHoveredLauncherChild(_ record: LauncherRecord?) {
+        let key = record.flatMap { record in expandedLauncherID.map { LauncherMenuLayout.ChildID(parent: $0, child: record.id) } }
+        guard hoveredLauncherChild != key else { return }
+        hoveredLauncherChild = key
+        refreshArtwork()
+    }
+
+    private func changeLauncherChildPage(_ direction: Int, parent: String? = nil) {
+        let id = parent ?? expandedLauncherID
+        guard let menu = visibleLauncherMenus.first(where: { $0.id == id }), menu.pageCount > 1 else { return }
+        setLauncherChildPage(RingGeometry.wrapped(menu.page + direction, count: menu.pageCount), menu: menu)
+        if expandedLauncherID == id { hoveredLauncherChild = nil }
+        refresh()
+    }
+
+    private func setLauncherChildPage(_ page: Int, menu: LauncherMenuLayout) {
+        if usesLauncherStrips { launcherStripPages[menu.id] = page }
+        else { launcherChildPage = page }
+    }
+
+    func resetLauncherStripPages() { launcherStripPages.removeAll() }
 
     var pageControlsRect: CGRect {
         CGRect(x: RingGeometry.center.x - 22, y: RingGeometry.center.y - 32, width: 44, height: 14)
@@ -221,7 +343,9 @@ enum RingApp {
         if showsLauncher {
             var running: [String: AppRecord] = [:]
             for app in apps where running[app.bundleID] == nil { running[app.bundleID] = app }
-            return launcherApps.map { .favorite($0, running: running[$0.app.bundleID]) }
+            return launcherApps.map { record in
+                .favorite(record, running: record.application.flatMap { running[$0.bundleID] })
+            }
         }
         let excluded = Set(options.excludedBundleIDs)
         return apps.filter { !excluded.contains($0.bundleID) && !additionalFavoriteProcesses.contains($0.pid) }.map(RingApp.running)
@@ -256,6 +380,8 @@ enum RingApp {
         self.apps = apps; self.options = options
         additionalFavoriteProcesses.removeAll()
         showsLauncher = false; optionPressed = false; launcherApps = []; launcherPage = 0; hoveredLauncher = nil
+        resetLauncherArc()
+        resetLauncherStripPages()
         itemCounts.removeAll()
         countsFromSelection.removeAll()
         windows = []; appPage = 0; runningAppPage = 0; windowPage = 0
@@ -277,9 +403,13 @@ enum RingApp {
     private func select(_ tile: RingApp) {
         guard !showsActionLauncher, !isEditingName else { return }
         cancelHover()
+        let secondary = tile.favorite?.item.secondary == nil ? nil : tile.favorite?.id
+        let changedArc = expandedLauncherID != secondary
+        if changedArc { resetLauncherArc() }
         guard let app = tile.running else {
             if selectedApp != nil { clearSelection(preserveKeyboard: true) }
-            if hoveredApp != tile.id { hoveredApp = tile.id; refreshArtwork() }
+            expandedLauncherID = secondary
+            if hoveredApp != tile.id || changedArc { hoveredApp = tile.id; refresh() }
             return
         }
         if hoveredApp != tile.id { hoveredApp = tile.id; refreshArtwork() }
@@ -352,14 +482,18 @@ enum RingApp {
     func refresh() {
         arcGroup.isHidden = !showsWindowArc
         arcGroup.frame = bounds; appGroup.frame = bounds
-        diskMaterial.setShape(diskPath)
         refreshArtwork()
         rebuildAccessibility()
     }
 
     func refreshArtwork() {
+        diskMaterial.setShape(diskPath)
         diskArtwork.needsDisplay = true
         highlightArtwork.needsDisplay = true
+        let arcPath = launcherArcPath
+        if let arcPath { launcherArcMaterial.setShape(arcPath) }
+        launcherArcMaterial.isHidden = arcPath == nil
+        launcherArcArtwork.needsDisplay = true
         updateTiles()
         dragArtwork.needsDisplay = true
     }
@@ -386,10 +520,22 @@ enum RingApp {
         }
         guard !isPointerDown, !isContextMenuOpen, !isEditingName else { return }
         if showsActionLauncher {
-            let id = launcherTarget(at: p)?.app.id
+            let id = launcherTarget(at: p)?.id
             if id != hoveredLauncher { hoveredLauncher = id; refreshArtwork() }
             return
         }
+        if windowIndex(at: p) == nil, let hit = launcherChild(at: p, holdingShortcut: selectingWithShortcut) {
+            if usesLauncherStrips && expandedLauncherID != hit.menu.id,
+               let tile = visibleRingApps.first(where: { $0.favorite?.id == hit.menu.id }) {
+                select(tile)
+            }
+            setHoveredLauncherChild(hit.child)
+            return
+        }
+        setHoveredLauncherChild(nil)
+        if activeLauncherMenu?.layout.bridgesArc(at: p) == true { return }
+        // Keep the menu open while the pointer crosses the inset to reach its pager.
+        if launcherChildPages > 1, radius < RingGeometry.appInner { return }
         let close = selectingWithShortcut ? nil : closeTarget(at: p)
         if hoveredClose != close?.id { hoveredClose = close?.id; refreshArtwork() }
         if close != nil {
@@ -441,7 +587,10 @@ enum RingApp {
                     && distance <= Double(visibleWindows.count) * RingGeometry.arcStep / 2 + 0.12
                 )
                 if !bridge {
+                    let hadLauncherArc = expandedLauncherID != nil
+                    resetLauncherArc()
                     if hoveredApp != nil { hoveredApp = nil; refreshArtwork() }
+                    if hadLauncherArc { refresh() }
                     setHoveredWindow(nil)
                     if selectedApp != nil && collapseWork == nil {
                         let work = DispatchWorkItem { [weak self] in self?.clearSelection() }
@@ -457,6 +606,7 @@ enum RingApp {
         guard !isEditingName else { return }
         if !preserveKeyboard { endKeyboardNavigation() }
         cancelHover()
+        resetLauncherArc()
         keepsSingleWindowArc = false
         selectedApp = nil; hoveredApp = nil; windows = []; hoveredWindow = nil; hoveredClose = nil
         loading = false; message = L10n.text("悬停应用", "Point at an app")
@@ -518,6 +668,9 @@ enum RingApp {
         }
         if let target = closeTarget(at: p) { pressTarget = .close(target) }
         else if let index = windowIndex(at: p) { pressTarget = .window(visibleWindows[index]) }
+        else if let hit = launcherChild(at: p) {
+            pressTarget = .launcherChild(parent: hit.menu.id, child: hit.child.id)
+        }
         else if let app = appTarget(at: p), let index = visibleRingApps.firstIndex(where: { $0.id == app.id }) {
             let center = RingGeometry.appIconCenter(index: index, count: visibleRingApps.count)
             let hitSize = appIconSize + 10
@@ -570,13 +723,18 @@ enum RingApp {
                 onActivateWindow?(record)
             }
         case .launcher(let record):
-            if showsActionLauncher, record.available, launcherTarget(at: p)?.app.id == record.app.id { onLaunchApp?(record.app) }
+            if showsActionLauncher, launcherTarget(at: p)?.id == record.id { activateLauncherRecord(record) }
+        case .launcherChild(let parent, let child):
+            if windowIndex(at: p) == nil, let hit = launcherChild(at: p), hit.menu.id == parent, hit.child.id == child {
+                activateLauncherRecord(hit.child)
+            } else { updateHover(at: p) }
         case .inactive:
             if showsActionLauncher, launcherTarget(at: p) == nil, hypot(p.x - pressPoint.x, p.y - pressPoint.y) < 6 { activateLauncher(at: p) }
         case .background:
             // A late hover response must not turn a background press into a new target.
             if hypot(p.x - pressPoint.x, p.y - pressPoint.y) < 6,
-               closeTarget(at: pressPoint) == nil, windowIndex(at: pressPoint) == nil, appTarget(at: pressPoint) == nil {
+               closeTarget(at: pressPoint) == nil, windowIndex(at: pressPoint) == nil,
+               appTarget(at: pressPoint) == nil, launcherChild(at: pressPoint) == nil {
                 activate(at: pressPoint)
             }
         }
@@ -594,6 +752,7 @@ enum RingApp {
         if let index = windowIndex(at: p) {
             onActivateWindow?(visibleWindows[index]); return
         }
+        if let hit = launcherChild(at: p) { activateLauncherRecord(hit.child); return }
         if let app = appTarget(at: p) {
             activateApp(app, singleWindow: selectedApp == app.running?.pid && windows.count == 1 ? windows[0] : nil)
             return
@@ -601,8 +760,10 @@ enum RingApp {
         let radius = hypot(p.x - RingGeometry.center.x, p.y - RingGeometry.center.y)
         if radius < RingGeometry.appInner {
             if pageControlsRect.contains(p) {
-                if showsWindowArc && windowPages > 1 { changeWindowPage(p.x < RingGeometry.center.x ? -1 : 1) }
-                else if appPages > 1 { changeAppPage(p.x < RingGeometry.center.x ? -1 : 1) }
+                let direction = p.x < RingGeometry.center.x ? -1 : 1
+                if launcherChildPages > 1 { changeLauncherChildPage(direction) }
+                else if showsWindowArc && windowPages > 1 { changeWindowPage(direction) }
+                else if appPages > 1 { changeAppPage(direction) }
             } else if !AXIsProcessTrusted() || (showsLauncher && launcherApps.isEmpty) { scheduleCenterSettings() }
             return
         }
@@ -610,7 +771,8 @@ enum RingApp {
     }
 
     private func activateApp(_ tile: RingApp, singleWindow: WindowRecord? = nil) {
-        if let favorite = tile.favorite, favorite.available { onLaunchApp?(favorite.app) }
+        if let favorite = tile.favorite, favorite.item.secondary != nil { select(tile) }
+        else if let favorite = tile.favorite, favorite.available { activateLauncherRecord(favorite) }
         else if let running = tile.running {
             if let singleWindow { onActivateWindow?(singleWindow) }
             else { onActivateApp?(running) }
@@ -673,6 +835,10 @@ enum RingApp {
         let delta = event.scrollingDeltaY != 0 ? event.scrollingDeltaY : event.scrollingDeltaX
         let direction = delta < 0 ? 1 : -1
         if showsActionLauncher { changeLauncherPage(direction); return }
+        if windowIndex(at: p) == nil, let hit = launcherChild(at: p), !usesLauncherStrips || hit.menu.pageCount > 1 {
+            changeLauncherChildPage(direction, parent: hit.menu.id)
+            return
+        }
         if hypot(p.x - RingGeometry.center.x, p.y - RingGeometry.center.y) >= RingGeometry.windowInner, showsWindowArc {
             changeWindowPage(direction)
         } else { changeAppPage(direction) }
@@ -722,11 +888,21 @@ enum RingApp {
         case .step(let direction):
             pendingSecondary = false
             if showsActionLauncher {
-                let current = launcherApps.firstIndex { $0.app.id == hoveredLauncher }
+                let apps = actionLauncherApps
+                let current = apps.firstIndex { $0.id == hoveredLauncher }
                 guard let next = RingNavigation.next(current: current, pageStart: launcherPage * 12,
-                    total: launcherApps.count, direction: direction) else { return }
+                    total: apps.count, direction: direction) else { return }
                 launcherPage = next / 12
-                hoveredLauncher = launcherApps[next].app.id
+                hoveredLauncher = apps[next].id
+                refresh()
+            } else if let arc = activeLauncherMenu, keyboardSecondary || hoveredLauncherChild != nil {
+                let children = arc.record.children
+                let current = children.firstIndex { arc.key($0) == hoveredLauncherChild }
+                guard let next = RingNavigation.next(current: current, pageStart: arc.children.startIndex,
+                    total: children.count, direction: direction) else { return }
+                keyboardSecondary = true
+                setLauncherChildPage(next / options.launcherSecondaryStyle.pageSize, menu: arc)
+                hoveredLauncherChild = arc.key(children[next])
                 refresh()
             } else if keyboardSecondary || hoveredWindow != nil {
                 guard showsWindowArc else { keyboardSecondary = false; return }
@@ -756,7 +932,11 @@ enum RingApp {
             }
         case .toggleSecondary:
             guard !showsActionLauncher else { return }
-            if keyboardSecondary || hoveredWindow != nil || pendingSecondary {
+            if let arc = activeLauncherMenu {
+                let entering = !keyboardSecondary && hoveredLauncherChild == nil
+                keyboardSecondary = entering && !arc.children.isEmpty
+                setHoveredLauncherChild(entering ? arc.children.first : nil)
+            } else if keyboardSecondary || hoveredWindow != nil || pendingSecondary {
                 pendingSecondary = false
                 keyboardSecondary = false
                 setHoveredWindow(nil)
@@ -768,11 +948,17 @@ enum RingApp {
             } else { enterSecondary() }
         case .activate:
             if showsActionLauncher {
-                if let record = launcherApps.first(where: { $0.app.id == hoveredLauncher }), record.available {
-                    onLaunchApp?(record.app)
-                }
+                if let record = actionLauncherApps.first(where: { $0.id == hoveredLauncher }) { activateLauncherRecord(record) }
+            } else if let record = currentLauncherChild {
+                activateLauncherRecord(record)
             } else if let record = currentWindow {
                 if !closingWindowIDs.contains(record.id) { onActivateWindow?(record) }
+            } else if let arc = activeLauncherMenu, let first = arc.children.first {
+                if usesLauncherStrips { activateLauncherRecord(first) }
+                else {
+                    keyboardSecondary = true
+                    setHoveredLauncherChild(first)
+                }
             } else if let tile = highlightedTile {
                 activateApp(tile)
             }
@@ -789,14 +975,19 @@ enum RingApp {
     func activateHovered() {
         guard !isEditingName, !isContextMenuOpen, !isPointerDown, hoveredClose == nil else { return }
         if showsActionLauncher {
-            if let record = launcherApps.first(where: { $0.app.id == hoveredLauncher }), record.available {
-                onLaunchApp?(record.app)
+            if let record = actionLauncherApps.first(where: { $0.id == hoveredLauncher }), record.available {
+                activateLauncherRecord(record)
             } else {
                 onClose?()
             }
             return
         }
-        if let window = currentWindow { onActivateWindow?(window) }
+        if let record = currentLauncherChild, record.available { activateLauncherRecord(record) }
+        else if usesLauncherStrips, keyboardPointer != nil, let first = activeLauncherMenu?.children.first, first.available {
+            activateLauncherRecord(first)
+        }
+        else if expandedLauncherID != nil { onClose?() }
+        else if let window = currentWindow { onActivateWindow?(window) }
         else if let tile = highlightedTile, tile.available {
             activateApp(tile, singleWindow: selectedApp == tile.running?.pid && windows.count == 1 ? windows[0] : nil)
         } else { onClose?() }
@@ -810,12 +1001,68 @@ enum RingApp {
     var appHighlightPath: CGPath? {
         let apps = visibleRingApps
         guard !isDraggingApp, let tile = highlightedTile, let index = apps.firstIndex(where: { $0.id == tile.id }) else { return nil }
+        if usesLauncherStrips, tile.favorite?.children.isEmpty == false { return nil }
         return RingGeometry.appPetalPath(index: index, count: apps.count)
     }
 
     private func drawDisk() {
         if showsActionLauncher { drawLauncher(); return }
         drawCenter()
+    }
+
+    private func drawLauncherArc() {
+        let menus = visibleLauncherMenus
+        guard !menus.isEmpty else { return }
+        let spacing = appSpacing(count: visibleRingApps.count)
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .center
+        paragraph.lineBreakMode = .byTruncatingTail
+        for menu in menus {
+            for (index, record) in menu.children.enumerated() {
+                let point = menu.layout.point(index)
+                let highlighted = menu.key(record) == hoveredLauncherChild
+                let icon = launcherChildIconRect(at: point, layout: menu.layout, index: index)
+                if highlighted {
+                    accent.withAlphaComponent(dark ? 0.35 : 0.20).setFill()
+                    NSBezierPath(roundedRect: icon.insetBy(dx: -5, dy: -4), xRadius: 9, yRadius: 9).fill()
+                }
+                let width = menu.layout.style == .arc ? 54.0 : (index == 0 ? min(42, spacing * 0.78) : min(42, menu.layout.stripHalfWidth * 1.6))
+                if width < 24 { continue }
+                (record.name as NSString).draw(in: NSRect(x: point.x - width / 2, y: icon.minY - 15, width: width, height: 13), withAttributes: [
+                    .font: NSFont.systemFont(ofSize: 10, weight: highlighted ? .semibold : .regular),
+                    .foregroundColor: record.available ? ink : muted, .paragraphStyle: paragraph
+                ])
+            }
+        }
+    }
+
+    private func launcherChildIconRect(at point: CGPoint, layout: LauncherSecondaryLayout, index: Int) -> CGRect {
+        let size = layout.replacesEntry ? (index == 0 ? min(28, appIconSize) : min(28, layout.stripHalfWidth * 1.45)) : 28
+        let inset = size < 22 ? size / 2 : size / 2 - 5
+        return CGRect(x: point.x - size / 2, y: point.y - inset, width: size, height: size)
+    }
+
+    private func updateLauncherChildTiles(_ menus: [LauncherMenuLayout]) {
+        let childIDs = Set(menus.flatMap { menu in menu.children.map { menu.key($0) } })
+        for id in launcherChildTiles.keys.filter({ !childIDs.contains($0) }) {
+            launcherChildTiles.removeValue(forKey: id)?.removeFromSuperview()
+        }
+        for menu in menus {
+            for (index, child) in menu.children.enumerated() {
+                let id = menu.key(child)
+                let tile = launcherChildTiles[id] ?? RingTile(glass: false)
+                if launcherChildTiles[id] == nil {
+                    launcherChildTiles[id] = tile
+                    launcherChildGroup.addSubview(tile)
+                }
+                let iconRect = launcherChildIconRect(at: menu.layout.point(index), layout: menu.layout, index: index)
+                tile.place(in: iconRect)
+                tile.artwork.render = {
+                    child.icon.draw(in: iconRect, from: .zero, operation: .sourceOver, fraction: child.available ? 1 : 0.45)
+                }
+                tile.update(highlighted: id == hoveredLauncherChild, animated: window?.isVisible == true)
+            }
+        }
     }
 
     private func drawAppHighlight() {
@@ -898,22 +1145,47 @@ enum RingApp {
         if let pid = app.running?.pid, let badge = itemCounts[pid]?.badge { drawBadge(badge, on: iconRect) }
     }
 
+    private func drawSecondaryEntry(_ app: RingApp, at point: CGPoint, spacing: Double) {
+        let font = NSFont.systemFont(ofSize: min(10, max(8, spacing * 0.24)), weight: .medium)
+        let labelHeight = font.pointSize + 3
+        // Leave room for at least one glyph and the ellipsis on the densest page.
+        let width = min(54, max(19, spacing * 0.70))
+        let iconSize = min(34, spacing * 0.63, spacing - labelHeight - 0.5)
+        // AppKit leaves some space above the glyphs inside the label rect.
+        let gap: CGFloat = spacing < 32 ? -2 : 1
+        let iconCenter = CGPoint(x: point.x, y: point.y + (labelHeight + gap) / 2)
+        drawApp(app, at: iconCenter, size: iconSize)
+
+        let label = NSRect(x: point.x - width / 2, y: point.y - (iconSize + labelHeight + gap) / 2,
+                           width: width, height: labelHeight)
+        RingCenterLabel.text(app.name, in: label, font: font, color: ink, wraps: false)
+    }
+
     private func updateTiles() {
+        let menus = visibleLauncherMenus
+        updateLauncherChildTiles(menus)
         appGroup.isHidden = showsActionLauncher
         let apps = showsActionLauncher ? [] : visibleRingApps
         let appIDs = Set(apps.map(\.id))
-        let size = appIconSize
+        let spacing = appSpacing(count: apps.count)
+        let size = min(34, spacing * 0.76)
         let highlightID = isDraggingApp ? nil : highlightedTile?.id
+        let replacedEntries = Set(menus.filter { $0.layout.replacesEntry }.map(\.id))
         for id in appTiles.keys.filter({ !appIDs.contains($0) }) { appTiles.removeValue(forKey: id)?.removeFromSuperview() }
         for (index, app) in apps.enumerated() {
             let fresh = appTiles[app.id] == nil
             let tile = appTiles[app.id] ?? RingTile(glass: false)
             if fresh { appTiles[app.id] = tile; appGroup.addSubview(tile) }
+            tile.isHidden = app.favorite.map { replacedEntries.contains($0.id) } ?? false
             let p = RingGeometry.appIconCenter(index: index, count: apps.count)
-            let side = size + 20
+            let isSecondary = app.favorite?.item.secondary != nil
+            let side = isSecondary ? min(54, spacing) + 4 : size + 20
             tile.place(in: CGRect(x: p.x - side / 2, y: p.y - side / 2, width: side, height: side))
             let highlighted = app.id == highlightID
-            tile.artwork.render = { [weak self] in self?.drawApp(app, at: p, size: size) }
+            tile.artwork.render = { [weak self] in
+                if isSecondary { self?.drawSecondaryEntry(app, at: p, spacing: spacing) }
+                else { self?.drawApp(app, at: p, size: size) }
+            }
             tile.update(highlighted: highlighted, animated: window?.isVisible == true)
             if fresh, window?.isVisible == true { tile.reveal(index: index, count: apps.count) }
         }
@@ -954,11 +1226,14 @@ enum RingApp {
             return
         }
         let app = highlightedTile ?? visibleRingApps.first { $0.running?.pid == selectedApp && selectedApp != nil }
-        let name = app?.name ?? (showsLauncher ? L10n.text("常用应用", "Favorites") : L10n.text("运行中的应用", "Running apps"))
-        let paging = (showsWindowArc && windowPages > 1) || appPages > 1
+        let name = currentLauncherChild?.name ?? app?.name ?? (showsLauncher ? L10n.text("常规", "Standard") : L10n.text("运行中的应用", "Running apps"))
+        let paging = launcherChildPages > 1 || (showsWindowArc && windowPages > 1) || appPages > 1
         let detail: String
-        if let app {
-            if !app.available { detail = L10n.text("找不到应用", "App not found") }
+        if let child = currentLauncherChild {
+            detail = child.available ? "" : L10n.text("找不到项目", "Item not found")
+        } else if let app {
+            if let arc = activeLauncherMenu { detail = arc.children.isEmpty ? L10n.text("无项目", "No items") : "" }
+            else if !app.available { detail = L10n.text("找不到项目", "Item not found") }
             else if selectingWithShortcut && highlightedTile != nil { detail = L10n.text("松开快捷键切换", "Release to switch") }
             else if app.running == nil { detail = L10n.text("点击打开", "Click to open") }
             else { detail = loading ? "" : message }
@@ -968,12 +1243,14 @@ enum RingApp {
         } else {
             detail = L10n.text("双击中心显示常用应用", "Double-click center for favorites")
         }
-        RingCenterLabel.draw(title: name, detail: detail,
-                             paging: paging, titleColor: ink, detailColor: muted)
+        let showsRingName = currentLauncherChild == nil && app?.favorite?.item.secondary != nil
+        RingCenterLabel.draw(title: name, detail: detail, paging: paging,
+                             titleLines: showsRingName ? 3 : nil, titleColor: ink, detailColor: muted)
         if paging {
             drawSymbol("chevron.left", rect: NSRect(x: c.x - 20, y: c.y - 29, width: 5, height: 8), color: muted)
             drawSymbol("chevron.right", rect: NSRect(x: c.x + 15, y: c.y - 29, width: 5, height: 8), color: muted)
-            let page = showsWindowArc && windowPages > 1 ? "\(windowPage + 1)/\(windowPages)" : "\(appPage + 1)/\(appPages)"
+            let page = launcherChildPages > 1 ? "\((activeLauncherMenu?.page ?? 0) + 1)/\(launcherChildPages)"
+                : showsWindowArc && windowPages > 1 ? "\(windowPage + 1)/\(windowPages)" : "\(appPage + 1)/\(appPages)"
             RingCenterLabel.page(page, in: NSRect(x: c.x - 14, y: c.y - 32, width: 28, height: 14), color: muted)
         }
     }
@@ -1001,10 +1278,10 @@ enum RingApp {
         if showsActionLauncher {
             for (i, record) in visibleLauncherApps.enumerated() {
                 let p = launcherPoint(i)
-                add("launcher:\(record.app.id)", record.app.name, help: L10n.text("打开应用", "Open app"),
+                add("launcher:\(record.id)", record.name, help: L10n.text("打开应用", "Open app"),
                     rect: NSRect(x: p.x - 22, y: p.y - 22, width: 44, height: 44), enabled: record.available) { [weak self] in
                     guard let self, self.showsActionLauncher, record.available else { return }
-                    self.onLaunchApp?(record.app)
+                    self.activateLauncherRecord(record)
                 }
             }
             if launcherPages > 1 {
@@ -1022,10 +1299,13 @@ enum RingApp {
             return
         }
         let apps = visibleRingApps
+        let menus = visibleLauncherMenus
+        let replacedEntries = Set(menus.filter { $0.layout.replacesEntry }.map(\.id))
         for (i, app) in apps.enumerated() {
+            if let record = app.favorite, replacedEntries.contains(record.id) { continue }
             let p = RingGeometry.appIconCenter(index: i, count: apps.count)
             let rect = NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48)
-            let id = app.favorite.map { "favorite:\($0.app.id)" } ?? "app:\(app.running?.pid ?? 0)"
+            let id = app.favorite.map { "favorite:\($0.id)" } ?? "app:\(app.running?.pid ?? 0)"
             if let running = app.running {
                 let mode = options.contentMode(for: running.bundleID).title
                 let label = itemCounts[running.pid]?.badge.map { "\(app.name), \($0) \(mode)" } ?? app.name
@@ -1034,9 +1314,21 @@ enum RingApp {
                     self.select(running)
                 }
             } else {
-                add(id, app.name, help: L10n.text("打开应用", "Open app"), rect: rect, enabled: app.available) { [weak self] in
+                let help = app.favorite?.item.secondary != nil ? L10n.text("展开二级圆环", "Expand secondary ring") : L10n.text("打开项目", "Open item")
+                add(id, app.name, help: help, rect: rect, enabled: app.available) { [weak self] in
                     guard let self, let tile = self.visibleRingApps.first(where: { $0.id == app.id }) else { return }
                     self.activateApp(tile)
+                }
+            }
+        }
+        for arc in menus {
+            for (index, record) in arc.children.enumerated() {
+                let p = arc.layout.point(index)
+                add("launcher-child:\(arc.record.id):\(record.id)", record.name, help: L10n.text("打开项目", "Open item"),
+                    rect: NSRect(x: p.x - 24, y: p.y - 24, width: 48, height: 48), enabled: record.available) { [weak self] in
+                    guard let self, let current = self.visibleLauncherMenus.first(where: { $0.id == arc.id }),
+                          let child = current.children.first(where: { $0.id == record.id }) else { return }
+                    self.activateLauncherRecord(child)
                 }
             }
         }
@@ -1045,10 +1337,22 @@ enum RingApp {
             add("window:\(win.id)", win.displayTitle + (win.minimized ? L10n.text("，已最小化", ", minimized") : ""), help: L10n.text("切换到此\(secondaryName)", "Switch to this item"), rect: NSRect(x: p.x - 35, y: p.y - 29, width: 70, height: 58)) { [weak self] in self?.onActivateWindow?(win) }
             add("close:\(win.id)", L10n.text("关闭 \(win.displayTitle)", "Close \(win.displayTitle)"), help: L10n.text("关闭此窗口或标签页", "Close this window or tab"), rect: closeButtonRect(at: i)) { [weak self] in self?.onCloseWindow?(win) }
         }
-        if showsWindowArc && windowPages > 1 {
+        for menu in menus where menu.pageCount > 1 {
+            let inCenter = menu.id == expandedLauncherID
+            let entry = menu.layout.point(0)
+            for direction in [-1, 1] {
+                let title = direction < 0 ? L10n.text("上一页", "Previous page") : L10n.text("下一页", "Next page")
+                let rect = inCenter ? NSRect(x: direction < 0 ? pageControlsRect.minX : c.x, y: pageControlsRect.minY, width: 22, height: 14)
+                    : CGRect(x: entry.x - 14, y: entry.y - 14, width: 28, height: 28)
+                add("launcher-child-page:\(menu.id):\(direction)", "\(menu.record.name) · \(title)", help: "", rect: rect) { [weak self] in
+                    self?.changeLauncherChildPage(direction, parent: menu.id)
+                }
+            }
+        }
+        if launcherChildPages <= 1, showsWindowArc && windowPages > 1 {
             add("window-previous", L10n.text("上一页\(secondaryName)", "Previous \(secondaryName.lowercased())"), help: L10n.text("圆弧滚动翻页", "Scroll over the arc to change pages"), rect: NSRect(x: pageControlsRect.minX, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeWindowPage(-1) }
             add("window-next", L10n.text("下一页\(secondaryName)", "Next \(secondaryName.lowercased())"), help: L10n.text("圆弧滚动翻页", "Scroll over the arc to change pages"), rect: NSRect(x: c.x, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeWindowPage(1) }
-        } else if appPages > 1 {
+        } else if launcherChildPages <= 1, appPages > 1 {
             add("app-previous", L10n.text("上一页应用", "Previous apps"), help: L10n.text("滚动或点击翻页", "Scroll or click to change pages"), rect: NSRect(x: pageControlsRect.minX, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeAppPage(-1) }
             add("app-next", L10n.text("下一页应用", "Next apps"), help: L10n.text("滚动或点击翻页", "Scroll or click to change pages"), rect: NSRect(x: c.x, y: pageControlsRect.minY, width: 22, height: 14)) { [weak self] in self?.changeAppPage(1) }
         }

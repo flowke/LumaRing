@@ -39,7 +39,7 @@ final class RingPanel: NSPanel {
     private var mouseMonitor: Any?
     private var localMouseMonitor: Any?
     private var gate = RequestGate()
-    var onSettings: (() -> Void)?
+    var onSettings: ((SettingsSection?) -> Void)?
     var onError: ((String) -> Void)?
     var isVisible: Bool { !closing && (panel?.isVisible == true || actionPanel?.isVisible == true) }
     private var closing = false
@@ -50,7 +50,7 @@ final class RingPanel: NSPanel {
         self.catalog = catalog
         super.init()
         actionView.onClose = { [weak self] in self?.dismiss() }
-        actionView.onSettings = { [weak self] in self?.dismiss(); self?.onSettings?() }
+        actionView.onSettings = { [weak self] in self?.dismiss(); self?.onSettings?(nil) }
         actionView.onAction = { [weak self] action in
             guard let self, self.actionMode, self.isVisible, !self.view.showsLauncher, let target = self.actionExecutor.focus else { return }
             guard !Preferences.shared.options.invocationShortcuts.contains(where: { action.conflicts(with: $0) }) else { return }
@@ -61,7 +61,12 @@ final class RingPanel: NSPanel {
             }
         }
         view.onClose = { [weak self] in self?.dismiss() }
-        view.onSettings = { [weak self] in self?.dismiss(); self?.onSettings?() }
+        view.onSettings = { [weak self] in
+            guard let self else { return }
+            let section: SettingsSection? = self.view.showsLauncher && self.view.launcherApps.isEmpty ? .launcher : nil
+            self.dismiss()
+            self.onSettings?(section)
+        }
         view.onVisibleAppsChanged = { [weak self] in self?.refreshCounts() }
         // Once the mouse takes over, releasing a held shortcut must not also switch.
         view.onPointerInteraction = { [weak self] in
@@ -107,6 +112,14 @@ final class RingPanel: NSPanel {
             self.dismiss()
             self.launcher.launch(app) { [weak self] success in
                 if !success { self?.onError?(L10n.text("未能打开这个应用。请在设置中重新添加。", "Could not open this app. Add it again in Settings.")) }
+            }
+        }
+        view.onOpenFolder = { [weak self] folder in
+            guard let self else { return }
+            self.dismiss()
+            guard let url = folder.resolve(), NSWorkspace.shared.open(url) else {
+                self.onError?(L10n.text("未能打开这个文件夹。请在设置中重新选择。", "Could not open this folder. Select it again in Settings."))
+                return
             }
         }
         view.onLauncherModeEntered = { [weak self] in
@@ -343,7 +356,7 @@ final class RingPanel: NSPanel {
         view.bounds = NSRect(x: 0, y: 0, width: RingGeometry.canvas, height: RingGeometry.canvas)
         view.reset(apps: catalog.snapshot(options: options, includeExcludedFavorites: true), options: options)
         if fromTrackpad { view.suppressInvocationClicks(at: ProcessInfo.processInfo.systemUptime) }
-        view.launcherApps = launcherCatalog.snapshot(options.launcherApps)
+        view.launcherApps = launcherCatalog.snapshot(options.launcherItems)
         if !actionMode { view.enterDefaultLauncherMode() }
         // The Option already held by the invocation shortcut must be released first.
         view.optionPressed = NSEvent.modifierFlags.contains(.option)
@@ -516,7 +529,7 @@ final class RingPanel: NSPanel {
             actionPanel?.orderOut(nil)
             let options = Preferences.shared.options
             view.reset(apps: catalog.snapshot(options: options, includeExcludedFavorites: true), options: options)
-            view.launcherApps = launcherCatalog.snapshot(options.launcherApps)
+            view.launcherApps = launcherCatalog.snapshot(options.launcherItems)
             view.enterDefaultLauncherMode()
             panel?.makeKeyAndOrderFront(nil); panel?.makeFirstResponder(view)
             view.refresh(); refreshCounts()
@@ -605,7 +618,7 @@ final class RingPanel: NSPanel {
         let live = Set(NSWorkspace.shared.runningApplications.filter { !$0.isTerminated }.map(\.processIdentifier))
         let retained = view.apps.filter { live.contains($0.pid) }
         let existing = Set(retained.map(\.pid))
-        let favorites = Set(view.launcherApps.map(\.app.bundleID))
+        let favorites = Set(view.launcherApps.compactMap { $0.application?.bundleID })
         let started = favorites.isEmpty ? [] : catalog.snapshot(options: view.options, includeExcludedFavorites: true)
             .filter { favorites.contains($0.bundleID) && !existing.contains($0.pid) }
         guard retained.count != view.apps.count || !started.isEmpty else { return }

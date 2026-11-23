@@ -73,7 +73,7 @@ import SwiftUI
             self?.settingsWindow?.cancelPinch()
             self?.pinchMinimizer.cancel()
         }
-        ring.onSettings = { [weak self] in self?.showSettings() }
+        ring.onSettings = { [weak self] section in self?.showSettings(section: section) }
         ring.onError = { [weak self] text in self?.showError(text) }
         catalog.onChange = { [weak self] in self?.ring.applicationsChanged() }
         Preferences.shared.$options.map(\.invocationShortcuts).removeDuplicates().sink { [weak self] _ in
@@ -224,18 +224,20 @@ import SwiftUI
     @objc private func settingsAction() { showSettings() }
     @objc private func quit() { ring.dismiss(); NSApp.terminate(nil) }
 
-    func showSettings() {
+    func showSettings(section: SettingsSection? = nil) {
         ring.dismiss()
         Preferences.shared.refreshPermissions()
         if settingsWindow == nil {
-            let host = NSHostingController(rootView: SettingsView())
+            let host = NSHostingController(rootView: SettingsView(section: section ?? .general))
             let window = SettingsWindow(contentViewController: host)
             window.title = L10n.text("LumaRing 设置", "LumaRing Settings")
-            window.styleMask = [.titled, .closable, .miniaturizable]
+            window.styleMask = [.titled, .closable, .miniaturizable, .resizable]
             window.setContentSize(NSSize(width: 680, height: 690))
             window.isReleasedWhenClosed = false
             window.center()
             settingsWindow = window
+        } else if let section {
+            NotificationCenter.default.post(name: .lumaRingSelectSettingsSection, object: section)
         }
         NSApp.activate(ignoringOtherApps: true)
         settingsWindow?.makeKeyAndOrderFront(nil)

@@ -9,6 +9,8 @@ public struct RingGeometry {
     public static let appCenterRadius: Double = 52
     public static let appOuter: Double = 118
     public static let appRadius = (appCenterRadius + appOuter) / 2
+    public static let appPageSize = 12
+    public static let appPageSizeRange = 4...24
     public static let windowInner: Double = 118
     public static let windowOuter: Double = 198
     public static let windowRadius: Double = 158
@@ -57,11 +59,16 @@ public struct RingGeometry {
         anchor + (Double(count - 1) / 2 - Double(index)) * arcStep
     }
 
-    public static func arcPath(count: Int, anchor: Double, inner: Double = windowInner, outer: Double = windowOuter) -> CGPath {
+    public static func arcPath(count: Int, anchor: Double, inner: Double = windowInner, outer: Double = windowOuter,
+                               corner: Double = 0) -> CGPath {
         let path = CGMutablePath()
         guard count > 0, inner >= 0, outer > inner else { return path }
         let half = arcHalfAngle(count: count)
         let start = anchor - half, end = anchor + half
+        if corner > 0, inner > 0 {
+            let inset = min(corner, (outer - inner) / 2, inner * half * 0.9)
+            return roundedSectorPath(start: start, end: end, inner: inner, outer: outer, corner: inset)
+        }
         path.move(to: point(angle: start, radius: outer))
         path.addArc(center: center, radius: outer, startAngle: start, endAngle: end, clockwise: false)
         path.addLine(to: point(angle: end, radius: inner))

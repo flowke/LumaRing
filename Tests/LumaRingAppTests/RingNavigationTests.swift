@@ -210,7 +210,7 @@ final class RingNavigationTests: XCTestCase {
         view.navigate(.step(1))
         XCTAssertEqual(view.launcherPage, 0)
         view.navigate(.step(-1))
-        XCTAssertEqual(view.hoveredLauncher, view.launcherApps.last?.app.id)
+        XCTAssertEqual(view.hoveredLauncher, view.launcherApps.last?.id)
         view.updateOption(pressed: false)
         XCTAssertFalse(view.showsLauncher)
         XCTAssertEqual(actions.hover, "a")

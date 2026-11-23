@@ -3,15 +3,19 @@ import Carbon
 import LumaRingCore
 import ServiceManagement
 import SwiftUI
-import UniformTypeIdentifiers
+
+extension Notification.Name {
+    static let lumaRingSelectSettingsSection = Notification.Name("local.lumaring.selectSettingsSection")
+}
 
 enum SettingsSection: CaseIterable, Identifiable {
-    case general, appearance, apps, actions, permissions, about, guide
+    case general, appearance, launcher, apps, actions, permissions, about, guide
     var id: Self { self }
     var title: String {
         switch self {
         case .general: return L10n.text("通用", "General")
         case .appearance: return L10n.text("外观", "Appearance")
+        case .launcher: return L10n.text("启动器", "Launcher")
         case .apps: return L10n.text("应用", "Apps")
         case .actions: return L10n.text("快捷操作", "Actions")
         case .permissions: return L10n.text("权限", "Permissions")
@@ -23,6 +27,7 @@ enum SettingsSection: CaseIterable, Identifiable {
         switch self {
         case .general: return "keyboard"
         case .appearance: return "circle.lefthalf.filled"
+        case .launcher: return "circle.circle"
         case .apps: return "square.grid.2x2"
         case .actions: return "bolt"
         case .permissions: return "lock.shield"
@@ -71,9 +76,19 @@ struct SettingsView: View {
                         switch selectedSection {
                         case .general: general
                         case .appearance: appearance
-                        case .apps:
-                            launcherSettings
-                            appFilter
+                        case .launcher:
+                            LauncherSettingsView(items: $preferences.options.launcherItems,
+                                pageSize: $preferences.options.launcherPageSize,
+                                secondaryStyle: $preferences.options.launcherSecondaryStyle) { app in
+                                VStack(alignment: .leading, spacing: 10) {
+                                    Text(app.name).font(.headline)
+                                    browserModePicker(for: app.bundleID, name: app.name)
+                                    if preferences.options.contentMode(for: app.bundleID) == .tabs {
+                                        browserConnectionStatus(for: app.bundleID, runningApp: apps.first { $0.bundleIdentifier == app.bundleID && !$0.isTerminated })
+                                    }
+                                }.padding(14).frame(width: 290, alignment: .leading)
+                            }
+                        case .apps: appFilter
                         case .actions:
                             card(L10n.text("应用内的常用操作", "Shortcuts for each app")) {
                                 ActionSettingsView(profiles: $preferences.options.actionProfiles,
@@ -91,6 +106,9 @@ struct SettingsView: View {
         .frame(minWidth: 680, idealWidth: 680, minHeight: 620, idealHeight: 690)
         .environment(\.locale, preferences.language.locale)
         .onAppear { refresh() }
+        .onReceive(NotificationCenter.default.publisher(for: .lumaRingSelectSettingsSection)) { notification in
+            if let section = notification.object as? SettingsSection { selectedSection = section }
+        }
         .onChange(of: preferences.language) { _, _ in
             loginError = nil
             browserTabs.refreshLanguage()
@@ -213,8 +231,8 @@ struct SettingsView: View {
                     valueLabel(L10n.text("中央文字", "Center text"), "\(preferences.options.centerTitleSize) pt")
                 }
                 Divider()
-                Stepper(value: $preferences.options.appPageSize, in: 4...24) {
-                    valueLabel(L10n.text("每页应用", "Apps per page"), "\(preferences.options.appPageSize)")
+                Stepper(value: $preferences.options.appPageSize, in: RingGeometry.appPageSizeRange) {
+                    valueLabel(L10n.text("每页运行中的应用", "Running apps per page"), "\(preferences.options.appPageSize)")
                 }
                 Stepper(value: $preferences.options.windowPageSize, in: RingGeometry.windowPageSizeRange) {
                     valueLabel(L10n.text("每页窗口 / 标签页", "Windows / tabs per page"), "\(preferences.options.windowPageSize)")
@@ -334,41 +352,6 @@ struct SettingsView: View {
         .task { logStatus = await AppLog.shared.status() }
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
             Task { @MainActor in logStatus = await AppLog.shared.status() }
-        }
-    }
-
-    private var launcherSettings: some View {
-        card(L10n.text("常用应用", "Favorites")) {
-            hint(L10n.text("轮盘默认显示这里的应用。悬停已运行的应用可查看窗口或标签页，点击可打开尚未运行的应用。双击轮盘中心可切换到运行中的应用。", "The ring opens with these apps. Point at a running favorite to see its windows or tabs, or click a stopped app to open it. Double-click the center to switch to running apps."))
-                .help(L10n.text("常用应用和运行中应用是两组独立入口，顺序保持此处配置顺序。", "Favorites and running apps are separate groups, and favorites keep this order."))
-            ForEach(preferences.options.launcherApps) { app in
-                VStack(alignment: .leading, spacing: 7) {
-                    HStack {
-                        Image(nsImage: NSWorkspace.shared.icon(forFile: app.path)).resizable().frame(width: 24, height: 24)
-                        Text(app.name)
-                        Spacer()
-                        browserModePicker(for: app.bundleID, name: app.name)
-                        Button(L10n.text("移除", "Remove")) { preferences.options.launcherApps.removeAll { $0.id == app.id } }
-                    }
-                    if preferences.options.contentMode(for: app.bundleID) == .tabs {
-                        browserConnectionStatus(for: app.bundleID, runningApp: apps.first { $0.bundleIdentifier == app.bundleID && !$0.isTerminated })
-                    }
-                }
-            }
-            Button(L10n.text("添加应用…", "Add apps…")) {
-                let panel = NSOpenPanel()
-                panel.title = L10n.text("添加常用应用", "Add favorites")
-                panel.prompt = L10n.text("添加", "Add")
-                panel.allowedContentTypes = [.applicationBundle]
-                panel.allowsMultipleSelection = true
-                panel.canChooseDirectories = false
-                panel.directoryURL = URL(fileURLWithPath: "/Applications", isDirectory: true)
-                panel.begin { result in
-                    guard result == .OK else { return }
-                    let added = panel.urls.compactMap(LauncherApp.read)
-                    preferences.options.launcherApps = LauncherApp.unique(preferences.options.launcherApps + added)
-                }
-            }
         }
     }
 

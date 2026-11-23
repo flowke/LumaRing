@@ -33,6 +33,8 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(defaults.previewSize, CGSize(width: 840, height: 630))
         XCTAssertTrue(defaults.sortByName)
         XCTAssertEqual(defaults.appPageSize, 12)
+        XCTAssertEqual(defaults.launcherPageSize, 12)
+        XCTAssertEqual(defaults.launcherSecondaryStyle, .arc)
         XCTAssertEqual(defaults.windowPageSize, 6)
         let saved = Data(#"{"shortcut":{"keyCode":15,"modifiers":6144,"label":"R"},"hoverDelay":0.5,"ringSize":500,"showAppNames":true,"reduceMotion":true,"excludedBundleIDs":["local.hidden"]}"#.utf8)
         let decoded = try JSONDecoder().decode(Options.self, from: saved)
@@ -40,6 +42,8 @@ final class RingStateTests: XCTestCase {
         XCTAssertEqual(decoded.ringSize, 500)
         XCTAssertEqual(decoded.excludedBundleIDs, ["local.hidden"])
         XCTAssertEqual(decoded.appPageSize, 12)
+        XCTAssertEqual(decoded.launcherPageSize, 12)
+        XCTAssertEqual(decoded.launcherSecondaryStyle, .arc)
         XCTAssertEqual(decoded.windowPageSize, 6)
         XCTAssertEqual(decoded.previewWidth, 840)
         let enlarged = try JSONDecoder().decode(Options.self, from: Data(#"{"previewWidth":960}"#.utf8))
@@ -53,12 +57,17 @@ final class RingStateTests: XCTestCase {
 
     func testSavedSizesAndSelectionArePreservedWithinCurrentBounds() throws {
         let saved = Data(#"{"shortcut":{"keyCode":49,"modifiers":6144,"label":"Space"},"holdToSelect":true,"ringSize":480,"appPageSize":8,"previewWidth":640}"#.utf8)
-        let decoded = try JSONDecoder().decode(Options.self, from: saved)
+        var decoded = try JSONDecoder().decode(Options.self, from: saved)
+        XCTAssertEqual(decoded.launcherPageSize, 8)
+        decoded.launcherPageSize = 16
+        decoded.launcherSecondaryStyle = .strip
         let restored = try JSONDecoder().decode(Options.self, from: JSONEncoder().encode(decoded))
         XCTAssertEqual(restored.shortcut.display, "⌃⌥Space")
         XCTAssertTrue(restored.holdToSelect)
         XCTAssertEqual(restored.ringSize, 480)
         XCTAssertEqual(restored.appPageSize, 8)
+        XCTAssertEqual(restored.launcherPageSize, 16)
+        XCTAssertEqual(restored.launcherSecondaryStyle, .strip)
         XCTAssertEqual(restored.previewWidth, 640)
         for (size, expected) in [(0, 400.0), (9999, 560.0)] {
             let options = try JSONDecoder().decode(Options.self, from: Data("{\"ringSize\":\(size)}".utf8))

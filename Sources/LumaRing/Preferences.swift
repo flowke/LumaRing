@@ -63,9 +63,12 @@ struct Options: Codable {
     var includeMinimized = true
     var sortByName = true
     var excludedBundleIDs: [String] = []
-    var appPageSize = 12
+    var appPageSize = RingGeometry.appPageSize
+    var launcherPageSize = RingGeometry.appPageSize
+    var launcherSecondaryStyle = LauncherSecondaryStyle.arc
     var windowPageSize = RingGeometry.windowPageSize
-    var launcherApps: [LauncherApp] = []
+    var launcherItems: [LauncherItem] = []
+    var launcherApps: [LauncherApp] { launcherItems.compactMap(\.application) }
     var appContentModes: [String: AppContentMode] = [:]
     func contentMode(for bundleID: String) -> AppContentMode {
         BrowserAdapters.supports(bundleID) ? (appContentModes[bundleID] ?? .windows) : .windows
@@ -84,8 +87,9 @@ struct Options: Codable {
 
     init() {}
     private enum CodingKeys: String, CodingKey {
-        case theme, ringMaterial, centerTitleSize, loggingEnabled, actionProfiles, actionRingApps, shortcut, actionShortcut, holdToSelect, trackpadTap, threeFingerPinch, ringSize, previews, previewWidth, includeMinimized, sortByName, excludedBundleIDs, appPageSize, windowPageSize, appContentModes, launcherApps
+        case theme, ringMaterial, centerTitleSize, loggingEnabled, actionProfiles, actionRingApps, shortcut, actionShortcut, holdToSelect, trackpadTap, threeFingerPinch, ringSize, previews, previewWidth, includeMinimized, sortByName, excludedBundleIDs, appPageSize, launcherPageSize, launcherSecondaryStyle, windowPageSize, appContentModes, launcherItems
     }
+    private enum LegacyKeys: String, CodingKey { case launcherApps }
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         theme = AppTheme(rawValue: (try? c.decode(String.self, forKey: .theme)) ?? "") ?? .system
@@ -108,10 +112,22 @@ struct Options: Codable {
         includeMinimized = try c.decodeIfPresent(Bool.self, forKey: .includeMinimized) ?? true
         sortByName = try c.decodeIfPresent(Bool.self, forKey: .sortByName) ?? true
         excludedBundleIDs = try c.decodeIfPresent([String].self, forKey: .excludedBundleIDs) ?? []
-        launcherApps = LauncherApp.unique(try c.decodeIfPresent([LauncherApp].self, forKey: .launcherApps) ?? [])
+        if let items = try c.decodeIfPresent([LauncherItem].self, forKey: .launcherItems) {
+            launcherItems = items
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyKeys.self)
+            let apps = try legacy.decodeIfPresent([LauncherApp].self, forKey: .launcherApps) ?? []
+            launcherItems = LauncherApp.unique(apps).map { .destination(.application($0)) }
+        }
         let rawModes = try c.decodeIfPresent([String: String].self, forKey: .appContentModes) ?? [:]
         appContentModes = rawModes.mapValues { AppContentMode(rawValue: $0) ?? .windows }
-        appPageSize = min(24, max(4, try c.decodeIfPresent(Int.self, forKey: .appPageSize) ?? 12))
+        let allowed = RingGeometry.appPageSizeRange
+        appPageSize = min(allowed.upperBound, max(allowed.lowerBound,
+            try c.decodeIfPresent(Int.self, forKey: .appPageSize) ?? RingGeometry.appPageSize))
+        // Older preferences used the same limit for running apps and the launcher.
+        launcherPageSize = min(allowed.upperBound, max(allowed.lowerBound,
+            try c.decodeIfPresent(Int.self, forKey: .launcherPageSize) ?? appPageSize))
+        launcherSecondaryStyle = (try? c.decode(LauncherSecondaryStyle.self, forKey: .launcherSecondaryStyle)) ?? .arc
         windowPageSize = min(RingGeometry.windowPageSizeRange.upperBound, max(RingGeometry.windowPageSizeRange.lowerBound,
             try c.decodeIfPresent(Int.self, forKey: .windowPageSize) ?? RingGeometry.windowPageSize))
     }
