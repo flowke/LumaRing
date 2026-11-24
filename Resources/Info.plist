@@ -28,17 +28,6 @@
 	<string>Copyright © 2026 LumaRing contributors. MIT License.</string>
 	<key>NSAppleEventsUsageDescription</key>
 	<string>LumaRing 需要读取所选浏览器的标签页标题和网址，并切换到你选择的标签页。所有数据仅在本机临时使用。</string>
-	<key>UTExportedTypeDeclarations</key>
-	<array>
-		<dict>
-			<key>UTTypeIdentifier</key>
-			<string>local.lumaring.launcher-reorder</string>
-			<key>UTTypeConformsTo</key>
-			<array>
-				<string>public.data</string>
-			</array>
-		</dict>
-	</array>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUAutomaticallyUpdate</key>

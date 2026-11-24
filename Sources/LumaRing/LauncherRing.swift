@@ -57,6 +57,14 @@ struct LauncherTileLayout {
                width: iconSize, height: iconSize)
     }
 
+    func highlightPath(at point: CGPoint, compact: Bool, padding: CGFloat) -> CGPath {
+        let horizontalInset: CGFloat = compact ? 3 : 5
+        let verticalInset: CGFloat = compact ? 2 : 4
+        let corner: CGFloat = (compact ? 12 : 9) + padding
+        let rect = iconRect(at: point).insetBy(dx: -horizontalInset - padding, dy: -verticalInset - padding)
+        return CGPath(roundedRect: rect, cornerWidth: corner, cornerHeight: corner, transform: nil)
+    }
+
     func labelRect(at point: CGPoint) -> CGRect {
         CGRect(x: point.x - labelWidth / 2, y: point.y - height / 2,
                width: labelWidth, height: labelHeight)
@@ -70,7 +78,7 @@ struct LauncherSecondaryLayout: Equatable {
     let count: Int
     let stripHalfWidth: Double
 
-    init(style: LauncherSecondaryStyle, anchor: Double, count: Int, stripHalfWidth: Double = 27) {
+    init(style: LauncherSecondaryStyle, anchor: Double, count: Int, stripHalfWidth: Double = defaultStripHalfWidth) {
         self.style = style
         self.anchor = anchor
         self.count = count
@@ -78,7 +86,9 @@ struct LauncherSecondaryLayout: Equatable {
     }
 
     static let stripStep = 48.0
-    private static let endPadding = 28.0
+    static let defaultStripHalfWidth = 30.0
+    private static let endPadding = 30.0
+    private static let stripJoinRatio = 40.0 / defaultStripHalfWidth
 
     var replacesEntry: Bool { style == .strip && count > 0 }
     var arcPath: CGPath? {
@@ -106,6 +116,11 @@ struct LauncherSecondaryLayout: Equatable {
         return min(Self.stripStep, stripHalfWidth * 2)
     }
 
+    func highlightPath(for tile: LauncherTileLayout, at index: Int, padding: CGFloat = 0) -> CGPath {
+        tile.highlightPath(at: point(index), compact: style == .strip && index > 0 && tile.labelHeight > 0,
+                           padding: padding)
+    }
+
     var diskPath: CGPath { Self.diskPath(with: [self]) }
 
     /// Adjacent strips share the space at the rim. A lone strip keeps its full width.
@@ -118,11 +133,11 @@ struct LauncherSecondaryLayout: Equatable {
                 return abs(atan2(sin(delta), cos(delta)))
             }.min() ?? .pi
             let available = RingGeometry.appOuter * sin(closest / 2)
-            return min(27, max(9, (available - 1) / 1.48))
+            return min(defaultStripHalfWidth, max(9, (available - 1) / stripJoinRatio))
         }
     }
 
-    private var joinY: Double { stripHalfWidth * (40.0 / 27) }
+    private var joinY: Double { stripHalfWidth * Self.stripJoinRatio }
     private var joinAngle: Double { asin(joinY / RingGeometry.appOuter) }
 
     static func diskPath(with layouts: [Self]) -> CGPath {
@@ -150,7 +165,7 @@ struct LauncherSecondaryLayout: Equatable {
         let radius = RingGeometry.appOuter
         let width = stripHalfWidth
         let joinX = radius * cos(joinAngle)
-        let tangent = min(15, width * 0.56)
+        let tangent = min(15, width * 0.56, (joinY - width) / cos(joinAngle))
         let tangentX = tangent * sin(joinAngle), tangentY = tangent * cos(joinAngle)
         let shoulder = radius + 10
         let tip = stripRadius(count - 1) + Self.endPadding
@@ -224,7 +239,8 @@ struct LauncherMenuLayout: Identifiable {
             let range = ranges[index]
             guard style == .strip ? !range.isEmpty : record.id == active else { return nil }
             let layout = LauncherSecondaryLayout(style: style, anchor: RingGeometry.angle(index: index, count: records.count),
-                                                 count: range.count, stripHalfWidth: style == .strip ? widths[index] : 27)
+                                                 count: range.count, stripHalfWidth: style == .strip
+                                                    ? widths[index] : LauncherSecondaryLayout.defaultStripHalfWidth)
             return Self(record: record, slot: index, layout: layout, children: record.children[range])
         }
     }

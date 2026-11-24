@@ -1017,9 +1017,10 @@ enum RingApp {
                 let point = menu.layout.point(index)
                 let highlighted = menu.key(record) == hoveredLauncherChild
                 let tile = primary.secondary(spacing: menu.layout.tileSpacing(at: index, mainSpacing: spacing))
-                if highlighted {
-                    accent.withAlphaComponent(dark ? 0.35 : 0.20).setFill()
-                    NSBezierPath(roundedRect: tile.iconRect(at: point).insetBy(dx: -5, dy: -4), xRadius: 9, yRadius: 9).fill()
+                if highlighted, let context = NSGraphicsContext.current?.cgContext {
+                    context.setFillColor(accent.withAlphaComponent(dark ? 0.35 : 0.20).cgColor)
+                    context.addPath(menu.layout.highlightPath(for: tile, at: index))
+                    context.fillPath()
                 }
                 drawLauncherName(record.name, available: record.available, highlighted: highlighted, tile: tile, at: point)
             }
