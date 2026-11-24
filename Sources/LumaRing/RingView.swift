@@ -201,10 +201,7 @@ enum RingApp {
     var windowPageSize: Int {
         min(RingGeometry.windowPageSizeRange.upperBound, max(RingGeometry.windowPageSizeRange.lowerBound, options.windowPageSize))
     }
-    private func appSpacing(count: Int) -> Double {
-        2 * RingGeometry.appRadius * sin(.pi / Double(max(count, 2)))
-    }
-    var appIconSize: Double { min(34, appSpacing(count: visibleRingApps.count) * 0.76) }
+    var appIconSize: Double { min(34, LauncherTileLayout.primarySpacing(count: visibleRingApps.count) * 0.76) }
     private var appPages: Int { RingGeometry.pageCount(total: ringApps.count, size: appPageSize) }
     private var windowPages: Int { RingGeometry.pageCount(total: windows.count, size: windowPageSize) }
     private func windowPoint(_ index: Int) -> CGPoint {
@@ -1013,12 +1010,13 @@ enum RingApp {
     private func drawLauncherArc() {
         let menus = visibleLauncherMenus
         guard !menus.isEmpty else { return }
-        let spacing = appSpacing(count: visibleRingApps.count)
+        let spacing = LauncherTileLayout.primarySpacing(count: visibleRingApps.count)
+        let primary = LauncherTileLayout(primarySpacing: spacing, showsName: options.launcherShowsItemNames)
         for menu in menus {
             for (index, record) in menu.children.enumerated() {
                 let point = menu.layout.point(index)
                 let highlighted = menu.key(record) == hoveredLauncherChild
-                let tile = launcherChildTileLayout(menu.layout, index: index, mainSpacing: spacing)
+                let tile = primary.secondary(spacing: menu.layout.tileSpacing(at: index, mainSpacing: spacing))
                 if highlighted {
                     accent.withAlphaComponent(dark ? 0.35 : 0.20).setFill()
                     NSBezierPath(roundedRect: tile.iconRect(at: point).insetBy(dx: -5, dy: -4), xRadius: 9, yRadius: 9).fill()
@@ -1028,12 +1026,7 @@ enum RingApp {
         }
     }
 
-    private func launcherChildTileLayout(_ layout: LauncherSecondaryLayout, index: Int, mainSpacing: CGFloat) -> LauncherTileLayout {
-        LauncherTileLayout(spacing: layout.tileSpacing(at: index, mainSpacing: mainSpacing), maxIconSize: 28,
-                           showsName: options.launcherShowsItemNames)
-    }
-
-    private func updateLauncherChildTiles(_ menus: [LauncherMenuLayout], mainSpacing: CGFloat) {
+    private func updateLauncherChildTiles(_ menus: [LauncherMenuLayout], primary: LauncherTileLayout, spacing: CGFloat) {
         let childIDs = Set(menus.flatMap { menu in menu.children.map { menu.key($0) } })
         for id in launcherChildTiles.keys.filter({ !childIDs.contains($0) }) {
             launcherChildTiles.removeValue(forKey: id)?.removeFromSuperview()
@@ -1046,7 +1039,7 @@ enum RingApp {
                     launcherChildTiles[id] = tile
                     launcherChildGroup.addSubview(tile)
                 }
-                let iconRect = launcherChildTileLayout(menu.layout, index: index, mainSpacing: mainSpacing)
+                let iconRect = primary.secondary(spacing: menu.layout.tileSpacing(at: index, mainSpacing: spacing))
                     .iconRect(at: menu.layout.point(index))
                 tile.place(in: iconRect)
                 tile.artwork.render = {
@@ -1150,10 +1143,9 @@ enum RingApp {
         appGroup.isHidden = showsActionLauncher
         let apps = showsActionLauncher ? [] : visibleRingApps
         let appIDs = Set(apps.map(\.id))
-        let spacing = appSpacing(count: apps.count)
-        updateLauncherChildTiles(menus, mainSpacing: spacing)
-        let layout = LauncherTileLayout(spacing: spacing, maxIconSize: 34,
-                                        showsName: showsLauncher && options.launcherShowsItemNames)
+        let spacing = LauncherTileLayout.primarySpacing(count: apps.count)
+        let layout = LauncherTileLayout(primarySpacing: spacing, showsName: showsLauncher && options.launcherShowsItemNames)
+        updateLauncherChildTiles(menus, primary: layout, spacing: spacing)
         let highlightID = isDraggingApp ? nil : highlightedTile?.id
         let replacedEntries = Set(menus.filter { $0.layout.replacesEntry }.map(\.id))
         for id in appTiles.keys.filter({ !appIDs.contains($0) }) { appTiles.removeValue(forKey: id)?.removeFromSuperview() }

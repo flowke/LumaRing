@@ -30,12 +30,24 @@ struct LauncherTileLayout {
     let labelHeight: CGFloat
     let gap: CGFloat
 
-    init(spacing: CGFloat, maxIconSize: CGFloat, showsName: Bool) {
+    static func primarySpacing(count: Int) -> CGFloat {
+        2 * RingGeometry.appRadius * sin(.pi / Double(max(count, 2)))
+    }
+
+    init(primarySpacing: CGFloat, showsName: Bool) {
+        self.init(spacing: primarySpacing, showsName: showsName, matchingIconSize: nil)
+    }
+
+    private init(spacing: CGFloat, showsName: Bool, matchingIconSize: CGFloat?) {
         fontSize = min(10, max(7, spacing * 0.30))
         labelWidth = showsName ? min(56, spacing * 0.80) : 0
         labelHeight = showsName ? fontSize + 3 : 0
         gap = showsName && spacing >= 28 ? 1 : 0
-        iconSize = min(maxIconSize, spacing * 0.76, max(1, spacing - labelHeight - gap - 2))
+        iconSize = matchingIconSize ?? min(34, spacing * 0.76, max(1, spacing - labelHeight - gap - 2))
+    }
+
+    func secondary(spacing: CGFloat) -> Self {
+        Self(spacing: spacing, showsName: labelHeight > 0, matchingIconSize: iconSize)
     }
 
     var height: CGFloat { iconSize + gap + labelHeight }

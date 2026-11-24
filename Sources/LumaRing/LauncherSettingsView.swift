@@ -25,6 +25,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
     @State private var settingsPage = 0
     @State private var settingsChildPage = 0
     @State private var dragScope = UUID().uuidString
+    @State private var draggedItem: LauncherReorder.Item?
     @State private var pendingRemoval: LauncherRecord?
 
     private var ring: LauncherRecord? { records.first { $0.id == editingRing } }
@@ -76,7 +77,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
             }
         }
         .onChange(of: options.launcherItems, initial: true) { _, newItems in
-            records = catalog.snapshot(newItems)
+            if records.map(\.item) != newItems { records = catalog.snapshot(newItems) }
             if let editingRing, !newItems.contains(where: { $0.id == editingRing }) { closeRing() }
             let lastPage = RingGeometry.pageCount(total: records.count, size: pageSize) - 1
             page = min(page, lastPage)
@@ -132,7 +133,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
                             childPage: childRange.lowerBound / secondaryStyle.pageSize,
                             alternateChildCount: alternateCount,
                             style: secondaryStyle, showsItemNames: options.launcherShowsItemNames, reorder: allowsEditing ? reorder : nil,
-                            selectRing: example == nil ? selectPreviewRing : nil)
+                            draggedItem: allowsEditing ? draggedItem : nil, selectRing: example == nil ? selectPreviewRing : nil)
             HStack(spacing: 16) {
                 if allowsEditing {
                     addButton(at: .preview)
@@ -167,7 +168,9 @@ struct LauncherSettingsView<BrowserControls: View>: View {
     }
 
     private var reorder: LauncherReorder {
-        LauncherReorder(scope: dragScope, move: move)
+        let source = $draggedItem
+        return LauncherReorder(scope: dragScope, begin: { source.wrappedValue = $0 },
+                               source: { source.wrappedValue }, move: move)
     }
 
     private func pager(page: Binding<Int>, count: Int) -> some View {
@@ -263,7 +266,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
         return HStack(spacing: 6) {
             Image(systemName: "line.3.horizontal").font(.system(size: 10, weight: .medium))
                 .foregroundStyle(.secondary).frame(width: 18, height: 26).contentShape(Rectangle())
-                .draggable(reorder.payload(for: record.id, parent: parent))
+                .onDrag { reorder.provider(for: .init(id: record.id, parent: parent)) }
                 .help(L10n.text("拖动排序", "Drag to reorder"))
                 .accessibilityHidden(true)
             if isRing {
@@ -302,7 +305,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
         .padding(.horizontal, 4)
         .contentShape(Rectangle())
         .modifier(LauncherHoverHighlight())
-        .modifier(LauncherDropTarget(reorder: reorder, id: record.id, parent: parent))
+        .modifier(LauncherListDropTarget(reorder: reorder, item: .init(id: record.id, parent: parent)))
         .contextMenu {
             Button(L10n.text("上移", "Move up")) {
                 if index > 0 { _ = move(record.id, rowRecords[index - 1].id, parent) }
@@ -357,6 +360,7 @@ struct LauncherSettingsView<BrowserControls: View>: View {
             let editedIndex = options.launcherItems.firstIndex { $0.id == editingRing }
             page = (editedIndex ?? target) / pageSize
         }
+        records = catalog.snapshot(options.launcherItems)
         return true
     }
 
@@ -543,10 +547,47 @@ private struct LauncherEditorLayout: Layout {
 }
 
 struct LauncherReorder {
+    struct Item: Hashable {
+        let id: String
+        let parent: String?
+
+        func accepts(_ source: Self?) -> Bool {
+            guard let source else { return false }
+            return parent == source.parent && id != source.id
+        }
+    }
+
+    static let contentType = UTType(exportedAs: "local.lumaring.launcher-reorder", conformingTo: .data)
     let scope: String
+    var begin: (Item) -> Void = { _ in }
+    var source: () -> Item? = { nil }
     let move: (String, String, String?) -> Bool
 
     func payload(for id: String, parent: String?) -> String { prefix(parent) + id }
+
+    func provider(for item: Item) -> NSItemProvider {
+        begin(item)
+        let data = Data(payload(for: item.id, parent: item.parent).utf8)
+        let provider = NSItemProvider()
+        provider.registerDataRepresentation(forTypeIdentifier: Self.contentType.identifier, visibility: .ownProcess) { completion in
+            completion(data, nil)
+            return nil
+        }
+        return provider
+    }
+
+    func receive(_ info: DropInfo, target: Item, completion: @escaping () -> Void = {}) -> Bool {
+        guard let provider = info.itemProviders(for: [Self.contentType]).first else { return false }
+        _ = provider.loadDataRepresentation(forTypeIdentifier: Self.contentType.identifier) { data, _ in
+            DispatchQueue.main.async {
+                if let data, let payload = String(data: data, encoding: .utf8) {
+                    _ = accept([payload], target: target.id, parent: target.parent)
+                }
+                completion()
+            }
+        }
+        return true
+    }
 
     func accept(_ payloads: [String], target: String, parent: String?) -> Bool {
         let prefix = prefix(parent)
@@ -555,6 +596,12 @@ struct LauncherReorder {
     }
 
     private func prefix(_ parent: String?) -> String { "\(scope):\(parent ?? "main"):" }
+
+    static func previewOrder<Item: Identifiable>(_ items: [Item], from source: String, to target: String) -> [Item] where Item.ID == String {
+        var ordered = items
+        _ = moveItem(source, to: target, in: &ordered)
+        return ordered
+    }
 
     static func moveItem<Item: Identifiable>(_ sourceID: String, to targetID: String, in items: inout [Item]) -> Int? where Item.ID == String {
         guard sourceID != targetID,
@@ -575,22 +622,68 @@ private struct LauncherHoverHighlight: ViewModifier {
     }
 }
 
-private struct LauncherDropTarget: ViewModifier {
+private struct LauncherListDropTarget: ViewModifier {
     let reorder: LauncherReorder
-    let id: String
-    let parent: String?
+    let item: LauncherReorder.Item
     @State private var targeted = false
 
     func body(content: Content) -> some View {
         content
             .background(targeted ? Color.accentColor.opacity(0.15) : .clear, in: RoundedRectangle(cornerRadius: 6))
-            .dropDestination(for: String.self) { payloads, _ in
-                reorder.accept(payloads, target: id, parent: parent)
-            } isTargeted: { targeted = $0 }
+            .onDrop(of: [LauncherReorder.contentType], delegate: LauncherDropTarget(reorder: reorder, item: item) {
+                targeted = $0
+            })
+    }
+}
+
+private struct LauncherDropTarget: DropDelegate {
+    let reorder: LauncherReorder
+    let item: LauncherReorder.Item
+    let onTargeted: (Bool) -> Void
+
+    func dropEntered(info: DropInfo) { onTargeted(item.accepts(reorder.source())) }
+    func dropExited(info: DropInfo) { onTargeted(false) }
+    func dropUpdated(info: DropInfo) -> DropProposal? {
+        let acceptsSource = item.accepts(reorder.source())
+        onTargeted(acceptsSource)
+        return DropProposal(operation: acceptsSource ? .move : .forbidden)
+    }
+    func performDrop(info: DropInfo) -> Bool {
+        guard item.accepts(reorder.source()), reorder.receive(info, target: item, completion: { onTargeted(false) }) else {
+            onTargeted(false)
+            return false
+        }
+        return true
     }
 }
 
 private struct LauncherPreview: View {
+    private struct Tile: Identifiable {
+        let id: LauncherReorder.Item
+        let record: LauncherRecord
+        let layout: LauncherTileLayout
+        let point: CGPoint
+        let angle: Double
+        let highlighted: Bool
+        let dragItem: LauncherReorder.Item
+        let groupID: String?
+    }
+
+    private struct TilePosition: ViewModifier, Animatable {
+        var angle: Double
+        var radius: Double
+        let transform: CGAffineTransform
+
+        var animatableData: AnimatablePair<Double, Double> {
+            get { AnimatablePair(angle, radius) }
+            set { (angle, radius) = (newValue.first, newValue.second) }
+        }
+
+        func body(content: Content) -> some View {
+            content.position(RingGeometry.point(angle: angle, radius: radius).applying(transform))
+        }
+    }
+
     let records: [LauncherRecord]
     let ringID: String?
     let childPage: Int
@@ -598,41 +691,77 @@ private struct LauncherPreview: View {
     let style: LauncherSecondaryStyle
     let showsItemNames: Bool
     let reorder: LauncherReorder?
+    let draggedItem: LauncherReorder.Item?
     let selectRing: ((String) -> Void)?
+
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @State private var hover: Tile?
+
+    private var previewRecords: [LauncherRecord] {
+        guard let source = draggedItem, let target = hover?.dragItem, target.accepts(source) else { return records }
+        if let parent = source.parent {
+            return records.map { record in
+                guard record.id == parent, let ring = record.item.secondary else { return record }
+                let children = LauncherReorder.previewOrder(record.children, from: source.id, to: target.id)
+                return LauncherRecord(secondary: ring, children: children)
+            }
+        }
+        return LauncherReorder.previewOrder(records, from: source.id, to: target.id)
+    }
+
+    private func menus(for records: [LauncherRecord]) -> [LauncherMenuLayout] {
+        LauncherMenuLayout.visible(records: records.map(Optional.some), style: style, active: ringID) { id in
+            id == ringID ? childPage : 0
+        }
+    }
+
+    private func fit(_ bounds: CGRect, in size: CGSize, maxScale: CGFloat = .infinity) -> CGAffineTransform {
+        let scale = max(0.01, min(maxScale, (size.width - 12) / bounds.width, (size.height - 12) / bounds.height))
+        return CGAffineTransform(a: scale, b: 0, c: 0, d: -scale,
+            tx: size.width / 2 - bounds.midX * scale, ty: size.height / 2 + bounds.midY * scale)
+    }
 
     var body: some View {
         GeometryReader { geometry in
             let ringIndex = records.firstIndex { $0.id == ringID }
             let anchor = ringIndex.map { RingGeometry.angle(index: $0, count: records.count) } ?? 0
-            let entries = records.map(Optional.some)
-            let menus = LauncherMenuLayout.visible(records: entries, style: style, active: ringID) { id in
-                id == ringID ? childPage : 0
-            }
-            let strips = style == .strip ? menus : LauncherMenuLayout.visible(records: entries, style: .strip, active: nil) { id in
+            let originalMenus = menus(for: records)
+            let strips = style == .strip ? originalMenus : LauncherMenuLayout.visible(records: records.map(Optional.some), style: .strip, active: nil) { id in
                 id == ringID ? childPage * LauncherSecondaryStyle.arc.pageSize / LauncherSecondaryStyle.strip.pageSize : 0
             }
             let stripDisk = LauncherSecondaryLayout.diskPath(with: strips.map(\.layout))
-            let disk = style == .strip ? stripDisk : RingGeometry.diskPath
-            let arc = style == .arc ? menus.first?.layout.arcPath : nil
-            let alternateArc = style == .strip ? LauncherArc.path(count: alternateChildCount, anchor: anchor) : arc
+            let alternateArc = style == .strip
+                ? LauncherArc.path(count: alternateChildCount, anchor: anchor)
+                : originalMenus.first?.layout.arcPath
             let frame = stripDisk.boundingBoxOfPath
             let bounds = alternateArc.map { $0.isEmpty ? frame : frame.union($0.boundingBoxOfPath) } ?? frame
-            let replacedSlots = Set(strips.map(\.slot))
-            let scale = max(0.01, min((geometry.size.width - 12) / bounds.width, (geometry.size.height - 12) / bounds.height))
-            let transform = CGAffineTransform(a: scale, b: 0, c: 0, d: -scale,
-                tx: geometry.size.width / 2 - bounds.midX * scale,
-                ty: geometry.size.height / 2 + bounds.midY * scale)
+            let targetTransform = fit(bounds, in: geometry.size)
+            let displayed = previewRecords
+            let displayedMenus = hover == nil ? originalMenus : menus(for: displayed)
+            let displayedRingIndex = displayed.firstIndex { $0.id == ringID }
+            let disk = style == .strip
+                ? (hover == nil ? stripDisk : LauncherSecondaryLayout.diskPath(with: displayedMenus.map(\.layout)))
+                : RingGeometry.diskPath
+            let arc = style == .arc ? displayedMenus.first?.layout.arcPath : nil
+            let diskBounds = disk.boundingBoxOfPath
+            let artworkBounds = arc.map { $0.isEmpty ? diskBounds : diskBounds.union($0.boundingBoxOfPath) } ?? diskBounds
+            let viewport = CGRect(origin: .zero, size: geometry.size)
+            let transform = hover != nil && !viewport.contains(artworkBounds.applying(targetTransform))
+                ? fit(artworkBounds, in: geometry.size, maxScale: targetTransform.a)
+                : targetTransform
+            let scale = transform.a
             let surface = Path { path in
                 path.addPath(Path(disk), transform: transform)
                 if let arc { path.addPath(Path(arc), transform: transform) }
             }
             let holeSide = RingGeometry.appCenterRadius * 2 * scale
-            let primarySpacing = 2 * RingGeometry.appRadius * sin(.pi / Double(max(records.count, 2)))
+            let targets = tiles(for: records, menus: originalMenus)
+            let displayedTiles = hover == nil ? targets : tiles(for: displayed, menus: displayedMenus)
             ZStack {
                 surface.fill(Color.primary.opacity(0.075))
                 surface.stroke(Color.primary.opacity(0.10), lineWidth: 0.6)
-                if let ringIndex, style == .arc || !replacedSlots.contains(ringIndex) {
-                    Path(RingGeometry.sectorPath(index: ringIndex, count: records.count, inner: RingGeometry.appCenterRadius, outer: RingGeometry.appOuter))
+                if let displayedRingIndex, !displayedMenus.contains(where: { $0.slot == displayedRingIndex && $0.layout.replacesEntry }) {
+                    Path(RingGeometry.sectorPath(index: displayedRingIndex, count: records.count, inner: RingGeometry.appCenterRadius, outer: RingGeometry.appOuter))
                         .applying(transform).fill(Color.accentColor.opacity(0.12))
                 }
                 Circle().fill(Color(nsColor: .controlBackgroundColor)).frame(width: holeSide, height: holeSide)
@@ -642,61 +771,115 @@ private struct LauncherPreview: View {
                         .font(.callout).foregroundStyle(.secondary).lineLimit(1)
                         .frame(width: holeSide * 0.82).position(RingGeometry.center.applying(transform))
                 }
-                ForEach(Array(records.enumerated()), id: \.element.id) { index, record in
-                    if style == .arc || !replacedSlots.contains(index) {
-                        let point = RingGeometry.appIconCenter(index: index, count: records.count).applying(transform)
-                        previewTile(record, spacing: primarySpacing, scale: scale, maxIconSize: 34,
-                                    highlighted: index == ringIndex, parent: nil).position(point)
-                    }
+                ForEach(displayedTiles) { tile in
+                    tileArtwork(tile, scale: scale)
+                        .opacity(hover != nil && tile.dragItem == draggedItem ? 0.22 : 1)
+                        .modifier(TilePosition(angle: tile.angle,
+                            radius: hypot(tile.point.x - RingGeometry.center.x, tile.point.y - RingGeometry.center.y),
+                            transform: transform))
+                        .animation(reduceMotion ? nil : .easeInOut(duration: 0.18), value: tile.point)
+                        .allowsHitTesting(false)
+                        .accessibilityHidden(true)
                 }
-                ForEach(menus) { menu in
-                    ForEach(Array(menu.children.enumerated()), id: \.element.id) { index, record in
-                        let point = menu.layout.point(index).applying(transform)
-                        let inPrimarySlot = menu.layout.replacesEntry && index == 0
-                        let spacing = menu.layout.tileSpacing(at: index, mainSpacing: primarySpacing)
-                        let dragAsGroup = inPrimarySlot && menu.id != ringID
-                        previewTile(record, spacing: spacing, scale: scale, maxIconSize: 28,
-                                    highlighted: false, parent: dragAsGroup ? nil : menu.id,
-                                    groupEntry: dragAsGroup ? menu.id : nil,
-                                    allowsDrag: menu.id == ringID || dragAsGroup).position(point)
-                    }
+                ForEach(targets) { tile in
+                    tileTarget(tile, scale: targetTransform.a).position(tile.point.applying(targetTransform))
                 }
             }
+            .onChange(of: targets.map(\.id)) { hover = nil }
+            .onChange(of: draggedItem) { hover = nil }
+            .onChange(of: ringID) { hover = nil }
+            .onChange(of: style) { hover = nil }
         }
     }
 
-    private func previewTile(_ record: LauncherRecord, spacing: CGFloat, scale: CGFloat, maxIconSize: CGFloat,
-                             highlighted: Bool, parent: String?,
-                             groupEntry: String? = nil, allowsDrag: Bool = true) -> some View {
-        let isSecondary = record.item.secondary != nil
-        let layout = LauncherTileLayout(spacing: spacing, maxIconSize: maxIconSize, showsName: showsItemNames)
-        let width = max(layout.labelWidth, layout.iconSize + 4) * scale
-        let tile = VStack(spacing: layout.gap * scale) {
-            LauncherItemIcon(record: record, size: layout.iconSize * scale)
-                .background(highlighted ? Color.accentColor.opacity(0.17) : .clear, in: RoundedRectangle(cornerRadius: 5))
+    private func tiles(for records: [LauncherRecord], menus: [LauncherMenuLayout]) -> [Tile] {
+        let spacing = LauncherTileLayout.primarySpacing(count: records.count)
+        let layout = LauncherTileLayout(primarySpacing: spacing, showsName: showsItemNames)
+        let replacedSlots = Set(menus.filter(\.layout.replacesEntry).map(\.slot))
+        let primary = records.enumerated().compactMap { index, record -> Tile? in
+            guard !replacedSlots.contains(index) else { return nil }
+            let item = LauncherReorder.Item(id: record.id, parent: nil)
+            return Tile(id: item, record: record, layout: layout,
+                        point: RingGeometry.appIconCenter(index: index, count: records.count),
+                        angle: RingGeometry.angle(index: index, count: records.count), highlighted: record.id == ringID,
+                        dragItem: item, groupID: record.item.secondary == nil ? nil : record.id)
+        }
+        let secondary = menus.flatMap { menu in
+            menu.children.enumerated().map { index, record in
+                let child = LauncherReorder.Item(id: record.id, parent: menu.id)
+                let dragAsGroup = style == .strip && menu.id != ringID
+                let item = dragAsGroup ? LauncherReorder.Item(id: menu.id, parent: nil) : child
+                let angle = style == .arc
+                    ? RingGeometry.arcAngle(index: index, count: menu.children.count, anchor: menu.layout.anchor)
+                    : menu.layout.anchor
+                return Tile(id: child, record: record, layout: layout.secondary(spacing: menu.layout.tileSpacing(at: index, mainSpacing: spacing)),
+                            point: menu.layout.point(index), angle: angle, highlighted: false,
+                            dragItem: item, groupID: dragAsGroup ? menu.id : nil)
+            }
+        }
+        return primary + secondary
+    }
+
+    private func tileSize(_ tile: Tile, scale: CGFloat) -> CGSize {
+        let layout = tile.layout
+        return CGSize(width: max(layout.labelWidth, layout.iconSize + 4) * scale,
+                      height: max(layout.height, layout.iconSize + 4) * scale)
+    }
+
+    private func tileArtwork(_ tile: Tile, scale: CGFloat) -> some View {
+        let layout = tile.layout
+        let size = tileSize(tile, scale: scale)
+        return VStack(spacing: layout.gap * scale) {
+            LauncherItemIcon(record: tile.record, size: layout.iconSize * scale)
+                .background(tile.highlighted ? Color.accentColor.opacity(0.17) : .clear, in: RoundedRectangle(cornerRadius: 5))
             if showsItemNames {
-                Text(record.name).font(.system(size: layout.fontSize * scale, weight: highlighted ? .semibold : .regular))
+                Text(tile.record.name).font(.system(size: layout.fontSize * scale, weight: tile.highlighted ? .semibold : .regular))
                     .lineLimit(1)
-                    .foregroundStyle(highlighted ? Color.accentColor : Color.secondary)
+                    .foregroundStyle(tile.highlighted ? Color.accentColor : Color.secondary)
                     .frame(width: layout.labelWidth * scale, height: layout.labelHeight * scale)
             }
         }
-        .frame(width: width, height: max(layout.height, layout.iconSize + 4) * scale)
-        .contentShape(Rectangle())
+        .frame(width: size.width, height: size.height)
+    }
 
+    private func tileTarget(_ tile: Tile, scale: CGFloat) -> some View {
+        let size = tileSize(tile, scale: scale)
+        let hitArea = Rectangle().fill(.clear).frame(width: size.width, height: size.height).contentShape(Rectangle())
         let control = Group {
-            if let groupID = groupEntry ?? (isSecondary ? record.id : nil), let selectRing {
-                Button { selectRing(groupID) } label: { tile }.buttonStyle(.plain)
-            } else { tile }
+            if let groupID = tile.groupID, let selectRing {
+                if reorder == nil {
+                    Button { selectRing(groupID) } label: { hitArea }.buttonStyle(.plain)
+                } else {
+                    hitArea.onTapGesture { selectRing(groupID) }
+                        .focusable(interactions: .activate)
+                        .onKeyPress(.space) {
+                            selectRing(groupID)
+                            return .handled
+                        }
+                        .accessibilityAddTraits(.isButton)
+                        .accessibilityAction { selectRing(groupID) }
+                }
+            } else {
+                hitArea.accessibilityElement()
+            }
         }
-        .accessibilityLabel(record.name)
-        .help(record.name)
+        .accessibilityLabel(tile.record.name)
+        .help(tile.record.name)
         return Group {
-            if let reorder, allowsDrag {
-                let id = groupEntry ?? record.id
-                control.draggable(reorder.payload(for: id, parent: parent))
-                    .modifier(LauncherDropTarget(reorder: reorder, id: id, parent: parent))
-            } else { control }
+            if let reorder {
+                control.onDrag { reorder.provider(for: tile.dragItem) } preview: {
+                    tileArtwork(tile, scale: scale)
+                }
+                .onDrop(of: [LauncherReorder.contentType], delegate: LauncherDropTarget(reorder: reorder, item: tile.dragItem) { targeted in
+                    if targeted {
+                        if hover?.id != tile.id { hover = tile }
+                    } else if hover?.id == tile.id {
+                        hover = nil
+                    }
+                })
+            } else {
+                control
+            }
         }
     }
 }

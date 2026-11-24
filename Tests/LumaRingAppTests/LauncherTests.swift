@@ -51,6 +51,79 @@ final class LauncherTests: XCTestCase {
         XCTAssertEqual(primary.map(\.id), [apps[1].id, last, first])
     }
 
+    func testReorderPreviewMovesASecondaryGroupWithoutSavingUntilDrop() {
+        let children = records(3)
+        let group = LauncherRecord(secondary: .init(name: "Tools"), children: children)
+        let apps = records(4)
+        var saved = [apps[0], group, apps[1], apps[2], apps[3]]
+        let original = saved.map(\.id)
+        let preview = LauncherReorder.previewOrder(saved, from: group.id, to: apps[3].id)
+
+        XCTAssertEqual(preview.map(\.id), [apps[0].id, apps[1].id, apps[2].id, apps[3].id, group.id])
+        XCTAssertEqual(preview.last?.children.map(\.id), children.map(\.id))
+        XCTAssertEqual(saved.map(\.id), original)
+
+        XCTAssertEqual(LauncherReorder.moveItem(group.id, to: apps[3].id, in: &saved), 4)
+        XCTAssertEqual(saved.map(\.id), preview.map(\.id))
+        XCTAssertEqual(LauncherReorder.previewOrder(saved, from: "off-page", to: apps[1].id).map(\.id), saved.map(\.id))
+    }
+
+    func testChildDragTargetsStayInTheirOwnMenu() {
+        let main = LauncherReorder.Item(id: "app", parent: nil)
+        let first = LauncherReorder.Item(id: "app", parent: "group:first")
+        let next = LauncherReorder.Item(id: "another-app", parent: first.parent)
+        let second = LauncherReorder.Item(id: "another-app", parent: "group:second")
+
+        XCTAssertTrue(next.accepts(first))
+        XCTAssertFalse(first.accepts(first))
+        XCTAssertFalse(main.accepts(first))
+        XCTAssertFalse(first.accepts(main))
+        XCTAssertFalse(second.accepts(first))
+    }
+
+    func testLauncherDragProviderPreservesTheGroupAndEditorScope() async throws {
+        let group = LauncherReorder.Item(id: "ring:\(UUID())", parent: nil)
+        let target = LauncherReorder.Item(id: "target", parent: nil)
+        var source: LauncherReorder.Item?
+        var moves: [LauncherReorder.Item] = []
+        let reorder = LauncherReorder(scope: "editor-1", begin: { source = $0 }) { id, _, parent in
+            moves.append(.init(id: id, parent: parent))
+            return true
+        }
+        let provider = reorder.provider(for: group)
+        XCTAssertEqual(source, group)
+        let identifier = LauncherReorder.contentType.identifier
+        XCTAssertTrue(provider.hasItemConformingToTypeIdentifier(identifier))
+        let data: Data = try await withCheckedThrowingContinuation { continuation in
+            _ = provider.loadDataRepresentation(forTypeIdentifier: identifier) { data, error in
+                if let data { continuation.resume(returning: data) }
+                else { continuation.resume(throwing: error ?? CocoaError(.fileReadCorruptFile)) }
+            }
+        }
+        let payload = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let otherEditor = LauncherReorder(scope: "editor-2", move: reorder.move)
+        XCTAssertFalse(otherEditor.accept([payload], target: target.id, parent: target.parent))
+        XCTAssertTrue(reorder.accept([payload], target: target.id, parent: target.parent))
+        XCTAssertEqual(moves, [group])
+    }
+
+    func testSecondaryTileIconsMatchThePrimaryRingInBothStyles() {
+        for count in RingGeometry.appPageSizeRange {
+            for showsName in [false, true] {
+                let spacing = LauncherTileLayout.primarySpacing(count: count)
+                let primary = LauncherTileLayout(primarySpacing: spacing, showsName: showsName)
+                for style in [LauncherSecondaryStyle.arc, .strip] {
+                    let menu = LauncherSecondaryLayout(style: style, anchor: 0, count: style.pageSize, stripHalfWidth: 9)
+                    for index in 0..<menu.count {
+                        let child = primary.secondary(spacing: menu.tileSpacing(at: index, mainSpacing: spacing))
+                        XCTAssertEqual(child.iconRect(at: menu.point(index)).size, primary.iconRect(at: .zero).size)
+                        XCTAssertEqual(child.labelHeight > 0, showsName)
+                    }
+                }
+            }
+        }
+    }
+
     func testLegacyFavoritesMigrateInOrderAndAnEmptyNewListTakesPrecedence() throws {
         struct LegacyOptions: Encodable { let launcherApps: [LauncherApp]; let launcherItems: [LauncherItem]? }
         let apps = records().compactMap(\.application).reversed()
